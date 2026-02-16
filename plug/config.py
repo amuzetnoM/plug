@@ -59,6 +59,13 @@ class AgentConfig(BaseModel):
     exec_max_output: int = 50_000
 
 
+class OllamaConfig(BaseModel):
+    enabled: bool = True
+    base_url: str = "http://localhost:11434"
+    models: list[str] = Field(default_factory=lambda: ["qwen2.5-coder:7b"])
+    timeout: float = 120.0
+
+
 class CompactionConfig(BaseModel):
     enabled: bool = True
     max_context_tokens: int = 100_000
@@ -74,6 +81,7 @@ class DaemonConfig(BaseModel):
 
 class PlugConfig(BaseModel):
     models: ModelsConfig = Field(default_factory=ModelsConfig)
+    ollama: OllamaConfig = Field(default_factory=OllamaConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)

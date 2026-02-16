@@ -153,19 +153,25 @@ class ChatProvider(ABC):
 # ── Provider chain (fallback logic) ─────────────────────────────────────
 
 class ProviderChain:
-    """Try models in order until one succeeds.
+    """Try providers and models in order until one succeeds.
 
-    Uses a single provider (they all go through the same proxy)
-    but rotates through model names on failure.
+    Supports multiple providers (e.g. proxy + ollama) with per-provider
+    model lists. Retries within each provider before falling back to next.
     """
 
     def __init__(
         self,
         provider: ChatProvider,
         models: list[str],
+        fallback_providers: list[tuple[ChatProvider, list[str]]] | None = None,
+        max_retries: int = 2,
+        retry_delay: float = 1.0,
     ):
         self.provider = provider
         self.models = models
+        self.fallback_providers = fallback_providers or []
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
         self._current_index = 0
 
     @property
@@ -180,33 +186,56 @@ class ProviderChain:
         temperature: float = 0.7,
         max_tokens: int = 4096,
     ) -> ChatResponse:
-        """Try each model in turn until one succeeds."""
+        """Try primary provider models with retry, then fallback providers."""
+        import asyncio
+
         last_error: Exception | None = None
 
+        # Try primary provider (with retry)
         for i in range(len(self.models)):
             idx = (self._current_index + i) % len(self.models)
             model = self.models[idx]
 
-            try:
-                response = await self.provider.chat(
-                    messages,
-                    model=model,
-                    tools=tools,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
-                # Success — remember this model for next time
-                self._current_index = idx
-                return response
+            for attempt in range(self.max_retries):
+                try:
+                    response = await self.provider.chat(
+                        messages, model=model, tools=tools,
+                        temperature=temperature, max_tokens=max_tokens,
+                    )
+                    self._current_index = idx
+                    return response
+                except Exception as e:
+                    last_error = e
+                    if attempt < self.max_retries - 1:
+                        delay = self.retry_delay * (attempt + 1)
+                        logger.warning(
+                            "Model %s attempt %d failed: %s — retrying in %.1fs",
+                            model, attempt + 1, e, delay,
+                        )
+                        await asyncio.sleep(delay)
+                    else:
+                        logger.warning("Model %s failed after %d attempts: %s", model, self.max_retries, e)
 
-            except Exception as e:
-                logger.warning("Model %s failed: %s", model, e)
-                last_error = e
-                continue
+        # Try fallback providers
+        for fb_provider, fb_models in self.fallback_providers:
+            for model in fb_models:
+                for attempt in range(self.max_retries):
+                    try:
+                        response = await fb_provider.chat(
+                            messages, model=model, tools=tools,
+                            temperature=temperature, max_tokens=max_tokens,
+                        )
+                        logger.info("Fallback succeeded: %s on %s", model, type(fb_provider).__name__)
+                        return response
+                    except Exception as e:
+                        last_error = e
+                        if attempt < self.max_retries - 1:
+                            await asyncio.sleep(self.retry_delay * (attempt + 1))
+                        else:
+                            logger.warning("Fallback model %s failed: %s", model, e)
 
-        # All models failed
         raise RuntimeError(
-            f"All models failed. Last error: {last_error}"
+            f"All providers and models failed. Last error: {last_error}"
         ) from last_error
 
     async def chat_stream(
@@ -227,3 +256,5 @@ class ProviderChain:
 
     async def close(self) -> None:
         await self.provider.close()
+        for fb_provider, _ in self.fallback_providers:
+            await fb_provider.close()

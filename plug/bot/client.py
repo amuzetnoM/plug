@@ -26,6 +26,7 @@ from plug.bot.chunker import chunk_message
 from plug.config import PlugConfig, DB_FILE
 from plug.models.base import ChatProvider, Message, ProviderChain
 from plug.models.proxy import ProxyChatProvider
+from plug.models.ollama import OllamaChatProvider
 from plug.prompt import load_system_prompt
 from plug.sessions.compactor import Compactor, count_message_tokens
 from plug.sessions.store import SessionStore
@@ -81,7 +82,7 @@ class PlugBot:
         self.store = SessionStore(DB_FILE)
         await self.store.open()
 
-        # Model provider
+        # Model provider (primary: proxy)
         proxy_cfg = self.config.models.proxy
         self.provider = ProxyChatProvider(
             base_url=proxy_cfg.base_url,
@@ -90,9 +91,35 @@ class PlugBot:
             default_model=self.config.models.primary,
         )
 
-        # Fallback chain
+        # Ollama fallback provider
+        self.ollama_provider: OllamaChatProvider | None = None
+        fallback_providers = []
+        if self.config.ollama.enabled:
+            self.ollama_provider = OllamaChatProvider(
+                base_url=self.config.ollama.base_url,
+                default_model=self.config.ollama.models[0] if self.config.ollama.models else "qwen2.5-coder:7b",
+                timeout=self.config.ollama.timeout,
+            )
+            if await self.ollama_provider.is_available():
+                available_models = await self.ollama_provider.list_models()
+                # Use configured models that are actually pulled
+                ollama_models = [
+                    m for m in self.config.ollama.models
+                    if m in available_models
+                ] or available_models[:3]
+                fallback_providers.append((self.ollama_provider, ollama_models))
+                logger.info("Ollama fallback ready: %s", ollama_models)
+            else:
+                logger.warning("Ollama not available at %s", self.config.ollama.base_url)
+
+        # Fallback chain: proxy models → ollama models
         all_models = [self.config.models.primary] + self.config.models.fallbacks
-        self.chain = ProviderChain(self.provider, all_models)
+        self.chain = ProviderChain(
+            self.provider, all_models,
+            fallback_providers=fallback_providers,
+            max_retries=2,
+            retry_delay=1.0,
+        )
 
         # Tool executor
         self.executor = ToolExecutor(workspace=self.config.agent.workspace)
@@ -155,6 +182,8 @@ class PlugBot:
             self.cron_scheduler.stop()
         if self.health:
             self.health.stop()
+        if self.ollama_provider:
+            await self.ollama_provider.close()
         if self.agent_manager:
             await self.agent_manager.cancel_all()
         if self.cron_store:
@@ -455,7 +484,17 @@ class PlugBot:
         for round_num in range(MAX_TOOL_ROUNDS):
             try:
                 model_list = [model] if model else [self.config.models.primary] + self.config.models.fallbacks
-                chain = ProviderChain(self.provider, model_list)
+                # Build fallback providers for sub-agents too
+                fb = []
+                if self.ollama_provider:
+                    ollama_models = self.config.ollama.models or ["qwen2.5-coder:7b"]
+                    fb.append((self.ollama_provider, ollama_models))
+                chain = ProviderChain(
+                    self.provider, model_list,
+                    fallback_providers=fb,
+                    max_retries=2,
+                    retry_delay=1.0,
+                )
                 response = await chain.chat(
                     conversation,
                     tools=TOOL_DEFINITIONS,
