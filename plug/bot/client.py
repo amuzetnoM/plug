@@ -31,6 +31,8 @@ from plug.sessions.compactor import Compactor, count_message_tokens
 from plug.sessions.store import SessionStore
 from plug.tools.definitions import TOOL_DEFINITIONS
 from plug.tools.executor import ToolExecutor
+from plug.cron.scheduler import CronStore, CronScheduler, CronJob
+from plug.agents.manager import AgentManager
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,9 @@ class PlugBot:
         self.chain: ProviderChain | None = None
         self.executor: ToolExecutor | None = None
         self.compactor: Compactor | None = None
+        self.cron_store: CronStore | None = None
+        self.cron_scheduler: CronScheduler | None = None
+        self.agent_manager: AgentManager | None = None
 
         # State
         self._processing: set[str] = set()  # channel IDs currently being processed
@@ -105,6 +110,22 @@ class PlugBot:
             self.config.agent.system_prompt_files,
         )
 
+        # Cron scheduler
+        cron_db = DB_FILE.parent / "cron.db"
+        self.cron_store = CronStore(cron_db)
+        await self.cron_store.open()
+        self.cron_scheduler = CronScheduler(
+            store=self.cron_store,
+            executor=self._execute_cron_job,
+        )
+
+        # Sub-agent manager
+        self.agent_manager = AgentManager(
+            run_fn=self._run_subagent,
+            deliver_fn=self._deliver_to_channel,
+            max_concurrent=self.config.agent.max_subagents if hasattr(self.config.agent, 'max_subagents') else 5,
+        )
+
         # Handle graceful shutdown
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -122,6 +143,12 @@ class PlugBot:
         """Graceful shutdown."""
         logger.info("Shutting down PLUG bot...")
 
+        if self.cron_scheduler:
+            self.cron_scheduler.stop()
+        if self.agent_manager:
+            await self.agent_manager.cancel_all()
+        if self.cron_store:
+            await self.cron_store.close()
         if self.executor:
             await self.executor.close()
         if self.provider:
@@ -148,6 +175,11 @@ class PlugBot:
         )
         await self.client.change_presence(activity=activity)
         logger.info("Status set: %s", status_text)
+
+        # Start cron scheduler
+        if self.cron_scheduler:
+            self.cron_scheduler.start()
+            logger.info("Cron scheduler started")
 
     async def on_message(self, message: DiscordMessage) -> None:
         """Handle incoming Discord messages."""
@@ -376,6 +408,76 @@ class PlugBot:
             text = text.replace(f"<@{bot_id}>", "").replace(f"<@!{bot_id}>", "")
 
         return text.strip()
+
+    # ── Cron & Sub-agent callbacks ───────────────────────────────────────
+
+    async def _execute_cron_job(self, job: CronJob) -> str:
+        """Execute a cron job payload."""
+        if job.payload_kind == "system_event":
+            # Inject text as a system message into the channel
+            if job.channel_id:
+                await self._deliver_to_channel(job.channel_id, f"⏰ **Cron** `{job.name}`: {job.payload_text}")
+            return job.payload_text
+
+        elif job.payload_kind == "agent_turn":
+            # Run a full agent turn and deliver the result
+            result = await self._run_subagent(job.payload_text, job.payload_model, job.payload_timeout)
+            if job.channel_id:
+                await self._deliver_to_channel(job.channel_id, f"⏰ **Cron** `{job.name}`:\n\n{result}")
+            return result
+
+        return f"Unknown payload kind: {job.payload_kind}"
+
+    async def _run_subagent(self, task: str, model: str | None, timeout: float) -> str:
+        """Run an isolated agent turn (for sub-agents and cron agent_turn payloads)."""
+        # Build a minimal conversation with system prompt + task
+        conversation = []
+        if self._system_prompt:
+            conversation.append(Message(role="system", content=self._system_prompt))
+        conversation.append(Message(role="user", content=task))
+
+        # Run agent loop (reuse the same logic but without Discord message context)
+        for round_num in range(MAX_TOOL_ROUNDS):
+            try:
+                model_list = [model] if model else [self.config.models.primary] + self.config.models.fallbacks
+                chain = ProviderChain(self.provider, model_list)
+                response = await chain.chat(
+                    conversation,
+                    tools=TOOL_DEFINITIONS,
+                    temperature=self.config.models.temperature,
+                    max_tokens=self.config.models.max_tokens,
+                )
+            except Exception as e:
+                return f"LLM error: {e}"
+
+            assistant_msg = response.message
+            conversation.append(assistant_msg)
+
+            if not response.has_tool_calls:
+                return assistant_msg.content or "(no output)"
+
+            for tc in assistant_msg.tool_calls:
+                result = await self.executor.execute(tc.name, tc.arguments)
+                conversation.append(Message(
+                    role="tool", content=result,
+                    tool_call_id=tc.id, name=tc.name,
+                ))
+
+        return "[Sub-agent reached maximum tool-call rounds]"
+
+    async def _deliver_to_channel(self, channel_id: str, text: str) -> None:
+        """Send a message to a Discord channel by ID."""
+        try:
+            channel = self.client.get_channel(int(channel_id))
+            if not channel:
+                channel = await self.client.fetch_channel(int(channel_id))
+            if channel and hasattr(channel, 'send'):
+                chunks = chunk_message(text, max_length=self.config.discord.max_message_length)
+                for chunk in chunks:
+                    await channel.send(chunk)
+                    await asyncio.sleep(0.3)
+        except Exception as e:
+            logger.error("Failed to deliver to channel %s: %s", channel_id, e)
 
 
 def _truncate_args(args: dict[str, Any], max_len: int = 200) -> str:
