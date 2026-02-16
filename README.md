@@ -1,4 +1,5 @@
-# PLUG — Discord AI Gateway
+# PLUG
+> Discord AI Gateway
 
 A simpler, more robust alternative to platforms like [OpenClaw](https://github.com/openclaw/openclaw). One Discord bot, one config file, one process. No sprawling plugin system, no fragile reconnection logic, no surprises.
 
