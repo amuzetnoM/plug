@@ -1,8 +1,8 @@
 # PLUG — Discord AI Gateway
 
-A lightweight, self-hosted Discord bot that connects to any OpenAI-compatible API. Built for stability and simplicity.
+A simpler, more robust alternative to platforms like [OpenClaw](https://github.com/openclaw/openclaw). One Discord bot, one config file, one process. No sprawling plugin system, no fragile reconnection logic, no surprises.
 
-PLUG gives your Discord server an AI assistant with tool calling, persistent memory, and automatic context management. No cloud dependencies, no vendor lock-in.
+PLUG gives your Discord server an AI assistant with tool calling, persistent memory, and automatic context management. No cloud dependencies, no vendor lock-in. Just a clean Python codebase you can actually read.
 
 ## Features
 
