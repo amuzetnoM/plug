@@ -3,15 +3,6 @@ PLUG CLI
 =========
 
 Command-line interface for the PLUG Discord AI Gateway.
-
-Usage:
-    plug bot       — Run the Discord bot directly
-    plug daemon    — Run as a background daemon
-    plug status    — Show health and status
-    plug setup     — Interactive configuration
-    plug config    — Show current config
-    plug sessions  — Manage sessions
-    plug install-service — Generate systemd user service
 """
 
 from __future__ import annotations
@@ -40,67 +31,251 @@ from plug.config import (
 from plug.daemon import is_running, read_pidfile, remove_pidfile, run_bot, setup_logging
 
 
-@click.group()
+# ── Branding ─────────────────────────────────────────────────────────────
+
+LOGO = r"""
+    ╔═══════════════════════════════════════╗
+    ║                                       ║
+    ║     ██████╗ ██╗     ██╗   ██╗ ██████╗ ║
+    ║     ██╔══██╗██║     ██║   ██║██╔════╝ ║
+    ║     ██████╔╝██║     ██║   ██║██║  ███╗║
+    ║     ██╔═══╝ ██║     ██║   ██║██║   ██║║
+    ║     ██║     ███████╗╚██████╔╝╚██████╔╝║
+    ║     ╚═╝     ╚══════╝ ╚═════╝  ╚═════╝ ║
+    ║                                       ║
+    ║     Discord AI Gateway       v0.1.0   ║
+    ╚═══════════════════════════════════════╝
+"""
+
+LOGO_MINI = "⚡ PLUG"
+
+BOX_T = "╔"
+BOX_B = "╚"
+BOX_H = "═"
+BOX_V = "║"
+BOX_TR = "╗"
+BOX_BR = "╝"
+BOX_M = "╠"
+BOX_MR = "╣"
+W = 44
+
+
+def box_top(title: str = "") -> str:
+    if title:
+        inner = f" {title} "
+        pad = W - 2 - len(inner)
+        return f"{BOX_T}{BOX_H}{inner}{BOX_H * pad}{BOX_TR}"
+    return f"{BOX_T}{BOX_H * (W - 2)}{BOX_TR}"
+
+
+def box_mid() -> str:
+    return f"{BOX_M}{BOX_H * (W - 2)}{BOX_MR}"
+
+
+def box_row(text: str) -> str:
+    padding = W - 4 - len(text)
+    if padding < 0:
+        text = text[: W - 7] + "..."
+        padding = 0
+    return f"{BOX_V}  {text}{' ' * padding}{BOX_V}"
+
+
+def box_bot() -> str:
+    return f"{BOX_B}{BOX_H * (W - 2)}{BOX_BR}"
+
+
+def success(msg: str) -> None:
+    click.echo(click.style(f"  ✓ {msg}", fg="green"))
+
+
+def fail(msg: str) -> None:
+    click.echo(click.style(f"  ✗ {msg}", fg="red"))
+
+
+def info(msg: str) -> None:
+    click.echo(click.style(f"  → {msg}", fg="cyan"))
+
+
+def dim(msg: str) -> None:
+    click.echo(click.style(f"    {msg}", dim=True))
+
+
+# ── CLI Root ─────────────────────────────────────────────────────────────
+
+@click.group(invoke_without_command=True)
 @click.version_option(version="0.1.0", prog_name="PLUG")
-def cli() -> None:
-    """PLUG — Discord AI Gateway."""
-    pass
+@click.pass_context
+def cli(ctx: click.Context) -> None:
+    """⚡ PLUG — Discord AI Gateway"""
+    if ctx.invoked_subcommand is None:
+        click.echo(LOGO)
+        click.echo("  Usage: plug <command>")
+        click.echo()
+        click.echo("  Commands:")
+        click.echo(click.style("    init      ", fg="cyan") + "First-time setup (interactive)")
+        click.echo(click.style("    start     ", fg="cyan") + "Start the bot")
+        click.echo(click.style("    stop      ", fg="cyan") + "Stop the bot")
+        click.echo(click.style("    restart   ", fg="cyan") + "Restart the bot")
+        click.echo(click.style("    status    ", fg="cyan") + "Show status dashboard")
+        click.echo(click.style("    health    ", fg="cyan") + "Run health checks")
+        click.echo(click.style("    logs      ", fg="cyan") + "Tail live logs")
+        click.echo(click.style("    config    ", fg="cyan") + "View/edit configuration")
+        click.echo(click.style("    sessions  ", fg="cyan") + "Manage sessions")
+        click.echo(click.style("    cron      ", fg="cyan") + "Manage scheduled jobs")
+        click.echo(click.style("    install   ", fg="cyan") + "Install as systemd service")
+        click.echo(click.style("    uninstall ", fg="cyan") + "Remove systemd service")
+        click.echo()
+        dim("https://github.com/amuzetnoM/plug")
+        click.echo()
 
 
-# ── plug bot ─────────────────────────────────────────────────────────────
+# ── plug init ────────────────────────────────────────────────────────────
 
 @cli.command()
+@click.option("--token", "-t", help="Discord bot token.")
+@click.option("--guild", "-g", help="Discord guild/server ID.")
+@click.option("--model", "-m", default="claude-opus-4.6", help="Primary model name.")
+@click.option("--proxy", "-p", default="http://localhost:3000/v1", help="OpenAI-compatible proxy URL.")
+@click.option("--workspace", "-w", help="Path to workspace (SOUL.md, AGENTS.md, etc).")
+@click.option("--yes", "-y", is_flag=True, help="Accept defaults, skip prompts.")
+def init(token: str | None, guild: str | None, model: str, proxy: str, workspace: str | None, yes: bool) -> None:
+    """First-time setup. Creates ~/.plug/ and config.json."""
+    click.echo()
+    click.echo(LOGO)
+    click.echo(click.style("  First-time setup", fg="cyan", bold=True))
+    click.echo()
+
+    ensure_config_dir()
+    config = load_config()
+
+    # Step 1: Discord token
+    click.echo(click.style("  1/5 ", fg="yellow", bold=True) + "Discord Bot Token")
+    if token:
+        config.discord.token = token
+        success("Token provided via flag")
+    elif yes and config.discord.token:
+        success("Using existing token")
+    else:
+        dim("Create a bot at https://discord.com/developers/applications")
+        dim("Bot → Token → Copy")
+        t = click.prompt("  Token", default="", show_default=False, hide_input=True)
+        if t:
+            config.discord.token = t
+            success("Token saved")
+        elif config.discord.token:
+            info("Keeping existing token")
+        else:
+            fail("No token. Bot won't connect without one.")
+    click.echo()
+
+    # Step 2: Guild ID
+    click.echo(click.style("  2/5 ", fg="yellow", bold=True) + "Discord Server (Guild ID)")
+    if guild:
+        config.discord.guild_ids = [guild]
+        success(f"Guild: {guild}")
+    elif yes:
+        success(f"Guild: {', '.join(config.discord.guild_ids)}")
+    else:
+        dim("Right-click your server → Copy Server ID")
+        dim("(Enable Developer Mode in Discord settings if needed)")
+        g = click.prompt("  Guild ID", default=config.discord.guild_ids[0] if config.discord.guild_ids else "")
+        if g:
+            config.discord.guild_ids = [g.strip()]
+            success(f"Guild: {g.strip()}")
+    click.echo()
+
+    # Step 3: Model
+    click.echo(click.style("  3/5 ", fg="yellow", bold=True) + "AI Model")
+    if yes:
+        config.models.primary = model
+        success(f"Model: {model}")
+    else:
+        dim("Any model your proxy supports (e.g. claude-opus-4.6, gpt-4o, llama3)")
+        m = click.prompt("  Model", default=model)
+        config.models.primary = m
+        success(f"Model: {m}")
+    click.echo()
+
+    # Step 4: Proxy URL
+    click.echo(click.style("  4/5 ", fg="yellow", bold=True) + "API Proxy URL")
+    if yes:
+        config.models.proxy.base_url = proxy
+        success(f"Proxy: {proxy}")
+    else:
+        dim("OpenAI-compatible endpoint (Copilot proxy, Ollama, LM Studio, etc)")
+        p = click.prompt("  URL", default=proxy)
+        config.models.proxy.base_url = p
+        success(f"Proxy: {p}")
+    click.echo()
+
+    # Step 5: Workspace
+    click.echo(click.style("  5/5 ", fg="yellow", bold=True) + "Workspace Path")
+    default_ws = workspace or config.agent.workspace or str(Path.home() / "workspace")
+    if yes:
+        config.agent.workspace = default_ws
+        success(f"Workspace: {default_ws}")
+    else:
+        dim("Directory with your SOUL.md, AGENTS.md, USER.md, etc")
+        dim("(Created automatically if it doesn't exist)")
+        w = click.prompt("  Path", default=default_ws)
+        config.agent.workspace = w
+        success(f"Workspace: {w}")
+    click.echo()
+
+    # Save
+    config.save()
+
+    click.echo(box_top("Setup Complete"))
+    click.echo(box_row(f"Config:    {CONFIG_FILE}"))
+    click.echo(box_row(f"Database:  {DB_FILE}"))
+    click.echo(box_row(f"Logs:      {LOG_FILE}"))
+    click.echo(box_mid())
+    click.echo(box_row("Next steps:"))
+    click.echo(box_row("  plug start          Run the bot"))
+    click.echo(box_row("  plug install        Install as service"))
+    click.echo(box_row("  plug status         Check everything"))
+    click.echo(box_bot())
+    click.echo()
+
+
+# ── plug start / stop / restart ──────────────────────────────────────────
+
+@cli.command()
+@click.option("--foreground", "-f", is_flag=True, help="Run in foreground (no daemon).")
 @click.option("--debug", is_flag=True, help="Enable debug logging.")
-def bot(debug: bool) -> None:
-    """Run the Discord bot directly (foreground)."""
-    try:
-        asyncio.run(run_bot(debug=debug))
-    except KeyboardInterrupt:
-        click.echo("\nStopped.")
+def start(foreground: bool, debug: bool) -> None:
+    """Start the PLUG bot."""
+    if foreground:
+        click.echo(f"{LOGO_MINI} Starting in foreground...")
+        try:
+            asyncio.run(run_bot(debug=debug))
+        except KeyboardInterrupt:
+            click.echo(f"\n{LOGO_MINI} Stopped.")
+        return
 
-
-# ── plug daemon ──────────────────────────────────────────────────────────
-
-@cli.group(invoke_without_command=True)
-@click.pass_context
-def daemon(ctx: click.Context) -> None:
-    """Manage the PLUG daemon."""
-    if ctx.invoked_subcommand is None:
-        ctx.invoke(daemon_start)
-
-
-@daemon.command("start")
-@click.option("--debug", is_flag=True, help="Enable debug logging.")
-def daemon_start(debug: bool) -> None:
-    """Start the bot as a background daemon."""
     if is_running():
         pid = read_pidfile()
-        click.echo(f"PLUG is already running (PID {pid}).")
+        info(f"Already running (PID {pid})")
         return
 
-    click.echo("Starting PLUG daemon...")
+    click.echo(f"{LOGO_MINI} Starting daemon...")
 
-    # Fork to background
     pid = os.fork()
     if pid > 0:
-        # Parent — wait briefly then check
-        time.sleep(1)
+        time.sleep(1.5)
         if is_running():
-            click.echo(f"PLUG daemon started (PID {read_pidfile()}).")
+            success(f"Running (PID {read_pidfile()})")
+            dim(f"Logs: tail -f {LOG_FILE}")
         else:
-            click.echo("Daemon may have failed to start. Check logs:")
-            click.echo(f"  tail -f {LOG_FILE}")
+            fail("Failed to start. Check logs:")
+            dim(f"tail -f {LOG_FILE}")
         return
 
-    # Child — become session leader
     os.setsid()
-
-    # Second fork
     pid2 = os.fork()
     if pid2 > 0:
         os._exit(0)
 
-    # Daemon process
     sys.stdin.close()
     stdout_log = open(LOG_FILE, "a")
     os.dup2(stdout_log.fileno(), sys.stdout.fileno())
@@ -116,172 +291,237 @@ def daemon_start(debug: bool) -> None:
         os._exit(0)
 
 
-@daemon.command("stop")
-def daemon_stop() -> None:
-    """Stop the running daemon."""
+@cli.command()
+def stop() -> None:
+    """Stop the PLUG bot."""
     pid = read_pidfile()
     if pid is None:
-        click.echo("PLUG is not running.")
+        info("Not running.")
         return
 
-    click.echo(f"Stopping PLUG daemon (PID {pid})...")
+    click.echo(f"{LOGO_MINI} Stopping (PID {pid})...")
     try:
         os.kill(pid, signal.SIGTERM)
-        # Wait for it to die
         for _ in range(30):
             time.sleep(0.5)
             try:
                 os.kill(pid, 0)
             except ProcessLookupError:
                 remove_pidfile()
-                click.echo("Stopped.")
+                success("Stopped.")
                 return
-        click.echo("Process didn't stop gracefully, sending SIGKILL...")
         os.kill(pid, signal.SIGKILL)
         remove_pidfile()
-        click.echo("Killed.")
+        success("Killed (SIGKILL).")
     except ProcessLookupError:
         remove_pidfile()
-        click.echo("Process already gone.")
+        success("Already stopped.")
 
 
-@daemon.command("restart")
+@cli.command()
 @click.option("--debug", is_flag=True)
 @click.pass_context
-def daemon_restart(ctx: click.Context, debug: bool) -> None:
-    """Restart the daemon."""
-    ctx.invoke(daemon_stop)
+def restart(ctx: click.Context, debug: bool) -> None:
+    """Restart the PLUG bot."""
+    ctx.invoke(stop)
     time.sleep(1)
-    ctx.invoke(daemon_start, debug=debug)
+    ctx.invoke(start, foreground=False, debug=debug)
 
 
 # ── plug status ──────────────────────────────────────────────────────────
 
 @cli.command()
 def status() -> None:
-    """Show PLUG status and health info."""
-    pid = read_pidfile()
+    """Show PLUG status dashboard."""
     config = load_config()
+    pid = read_pidfile()
 
-    click.echo("╔══════════════════════════════════╗")
-    click.echo("║       PLUG Status                ║")
-    click.echo("╠══════════════════════════════════╣")
+    click.echo()
+    click.echo(box_top("PLUG Status"))
 
-    # Running status
+    # Process
     if pid:
-        click.echo(f"║  Status:  🟢 Running (PID {pid})")
-        # Get uptime from /proc
         try:
-            stat = Path(f"/proc/{pid}/stat").read_text()
-            # Rough uptime from process start
+            os.kill(pid, 0)
             create_time = os.path.getctime(f"/proc/{pid}")
             uptime_s = time.time() - create_time
-            hours = int(uptime_s // 3600)
-            mins = int((uptime_s % 3600) // 60)
-            click.echo(f"║  Uptime:  {hours}h {mins}m")
-        except Exception:
-            click.echo("║  Uptime:  unknown")
+            h, m = int(uptime_s // 3600), int((uptime_s % 3600) // 60)
+            click.echo(box_row(f"Process:  🟢 Running (PID {pid}, {h}h{m}m)"))
+        except (ProcessLookupError, FileNotFoundError):
+            click.echo(box_row("Process:  🔴 Stale PID (cleaning)"))
+            remove_pidfile()
     else:
-        click.echo("║  Status:  🔴 Stopped")
+        click.echo(box_row("Process:  🔴 Stopped"))
 
-    click.echo(f"║  Model:   {config.models.primary}")
-    click.echo(f"║  Proxy:   {config.models.proxy.base_url}")
-    click.echo(f"║  Config:  {CONFIG_FILE}")
-    click.echo(f"║  DB:      {DB_FILE}")
-    click.echo(f"║  Log:     {LOG_FILE}")
+    click.echo(box_row(f"Model:    {config.models.primary}"))
+    click.echo(box_row(f"Proxy:    {config.models.proxy.base_url}"))
 
-    # Session count
+    # Sessions
     if DB_FILE.exists():
-        try:
-            import sqlite3
-            conn = sqlite3.connect(str(DB_FILE))
-            count = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-            msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-            conn.close()
-            click.echo(f"║  Sessions: {count} ({msg_count} messages)")
-        except Exception:
-            click.echo("║  Sessions: (db error)")
+        import sqlite3
+        conn = sqlite3.connect(str(DB_FILE))
+        sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        messages = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        conn.close()
+        click.echo(box_row(f"Sessions: {sessions} ({messages:,} messages)"))
     else:
-        click.echo("║  Sessions: 0")
+        click.echo(box_row("Sessions: 0"))
 
-    click.echo("╚══════════════════════════════════╝")
+    # Cron
+    cron_db = CONFIG_DIR / "cron.db"
+    if cron_db.exists():
+        import sqlite3
+        conn = sqlite3.connect(str(cron_db))
+        try:
+            jobs = conn.execute("SELECT COUNT(*) FROM cron_jobs WHERE enabled = 1").fetchone()[0]
+            click.echo(box_row(f"Cron:     {jobs} active job(s)"))
+        except Exception:
+            click.echo(box_row("Cron:     (no table)"))
+        conn.close()
+    else:
+        click.echo(box_row("Cron:     —"))
+
+    click.echo(box_mid())
+    click.echo(box_row(f"Config:   {CONFIG_FILE}"))
+    click.echo(box_row(f"Logs:     {LOG_FILE}"))
+    click.echo(box_bot())
+    click.echo()
 
 
-# ── plug setup ───────────────────────────────────────────────────────────
+# ── plug health ──────────────────────────────────────────────────────────
 
 @cli.command()
-def setup() -> None:
-    """Interactive configuration setup."""
-    click.echo("PLUG Setup")
-    click.echo("=" * 40)
+def health() -> None:
+    """Run health checks on all components."""
+    from plug.health import check_once
 
-    config = load_config()
+    click.echo()
+    click.echo(box_top("Health Check"))
 
-    # Discord token
-    token = click.prompt(
-        "Discord bot token",
-        default=_mask(config.discord.token) if config.discord.token else "",
-        show_default=True,
-    )
-    if token and not token.startswith("***"):
-        config.discord.token = token
+    async def _run():
+        config = load_config()
+        proxy_url = config.models.proxy.base_url.replace("/v1", "")
+        statuses = await check_once(proxy_url=proxy_url)
 
-    # Guild IDs
-    guilds = click.prompt(
-        "Guild IDs (comma-separated)",
-        default=",".join(config.discord.guild_ids),
-        show_default=True,
-    )
-    config.discord.guild_ids = [g.strip() for g in guilds.split(",") if g.strip()]
+        for name, s in sorted(statuses.items()):
+            icon = "🟢" if s.healthy else "🔴"
+            latency = f"  {s.latency_ms:.0f}ms" if s.latency_ms else ""
+            click.echo(box_row(f"{icon} {name:<12} {s.message}{latency}"))
 
-    # Model
-    config.models.primary = click.prompt(
-        "Primary model",
-        default=config.models.primary,
-        show_default=True,
-    )
+    asyncio.run(_run())
 
-    # Proxy URL
-    config.models.proxy.base_url = click.prompt(
-        "Proxy base URL",
-        default=config.models.proxy.base_url,
-        show_default=True,
-    )
+    # Bot process
+    pid = read_pidfile()
+    if pid:
+        try:
+            os.kill(pid, 0)
+            click.echo(box_row(f"🟢 bot          PID {pid}"))
+        except ProcessLookupError:
+            click.echo(box_row("🔴 bot          stale PID"))
+    else:
+        click.echo(box_row("🔴 bot          not running"))
 
-    # DM allowlist
-    dm_list = click.prompt(
-        "DM allowlist user IDs (comma-separated)",
-        default=",".join(config.discord.dm_allowlist),
-        show_default=True,
-    )
-    config.discord.dm_allowlist = [u.strip() for u in dm_list.split(",") if u.strip()]
+    # Cron
+    cron_db = CONFIG_DIR / "cron.db"
+    if cron_db.exists():
+        import sqlite3
+        conn = sqlite3.connect(str(cron_db))
+        try:
+            count = conn.execute("SELECT COUNT(*) FROM cron_jobs WHERE enabled = 1").fetchone()[0]
+            click.echo(box_row(f"🟢 cron         {count} job(s)"))
+        except Exception:
+            click.echo(box_row("⚪ cron         no jobs"))
+        conn.close()
+    else:
+        click.echo(box_row("⚪ cron         —"))
 
-    # Require mention
-    config.discord.require_mention = click.confirm(
-        "Require @mention in guilds?",
-        default=config.discord.require_mention,
-    )
+    click.echo(box_bot())
+    click.echo()
 
-    # Save
-    config.save()
-    click.echo(f"\n✅ Config saved to {CONFIG_FILE}")
+
+# ── plug logs ────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--lines", "-n", default=50, help="Number of lines to show.")
+@click.option("--follow", "-f", is_flag=True, help="Follow log output.")
+def logs(lines: int, follow: bool) -> None:
+    """View bot logs."""
+    if not LOG_FILE.exists():
+        info("No log file yet. Start the bot first.")
+        return
+
+    if follow:
+        os.execvp("tail", ["tail", "-f", "-n", str(lines), str(LOG_FILE)])
+    else:
+        os.execvp("tail", ["tail", "-n", str(lines), str(LOG_FILE)])
 
 
 # ── plug config ──────────────────────────────────────────────────────────
 
-@cli.command("config")
-def show_config() -> None:
-    """Show current configuration (secrets masked)."""
-    config = load_config()
-    data = config.model_dump()
+@cli.group(invoke_without_command=True)
+@click.pass_context
+def config(ctx: click.Context) -> None:
+    """View or edit configuration."""
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(config_show)
 
-    # Mask secrets
+
+@config.command("show")
+def config_show() -> None:
+    """Show current config (secrets masked)."""
+    cfg = load_config()
+    data = cfg.model_dump()
+
     if data.get("discord", {}).get("token"):
         data["discord"]["token"] = _mask(data["discord"]["token"])
     if data.get("models", {}).get("proxy", {}).get("api_key"):
         data["models"]["proxy"]["api_key"] = _mask(data["models"]["proxy"]["api_key"])
 
     click.echo(json.dumps(data, indent=2, default=str))
+
+
+@config.command("set")
+@click.argument("key")
+@click.argument("value")
+def config_set(key: str, value: str) -> None:
+    """Set a config value. Use dot notation: discord.token, models.primary, etc."""
+    cfg = load_config()
+    data = cfg.model_dump()
+
+    parts = key.split(".")
+    target = data
+    for p in parts[:-1]:
+        if p not in target:
+            fail(f"Unknown key: {key}")
+            return
+        target = target[p]
+
+    final_key = parts[-1]
+    if final_key not in target:
+        fail(f"Unknown key: {key}")
+        return
+
+    # Type coerce
+    old = target[final_key]
+    if isinstance(old, bool):
+        value = value.lower() in ("true", "1", "yes")
+    elif isinstance(old, int):
+        value = int(value)
+    elif isinstance(old, float):
+        value = float(value)
+    elif isinstance(old, list):
+        value = [v.strip() for v in value.split(",")]
+
+    target[final_key] = value
+    new_cfg = PlugConfig(**data)
+    new_cfg.save()
+    success(f"{key} = {value}")
+
+
+@config.command("path")
+def config_path() -> None:
+    """Show config file path."""
+    click.echo(CONFIG_FILE)
 
 
 # ── plug sessions ────────────────────────────────────────────────────────
@@ -293,10 +533,10 @@ def sessions() -> None:
 
 
 @sessions.command("list")
-def sessions_list() -> None:
+def sessions_list_cmd() -> None:
     """List all sessions."""
     if not DB_FILE.exists():
-        click.echo("No sessions database found.")
+        info("No sessions yet.")
         return
 
     import sqlite3
@@ -314,37 +554,39 @@ def sessions_list() -> None:
     conn.close()
 
     if not rows:
-        click.echo("No sessions.")
+        info("No sessions.")
         return
 
-    click.echo(f"{'Channel ID':<22} {'Messages':>8} {'Tokens':>8} {'Last Active'}")
-    click.echo("-" * 65)
+    click.echo()
+    click.echo(box_top("Sessions"))
     for r in rows:
-        updated = datetime.fromtimestamp(r["updated_at"]).strftime("%Y-%m-%d %H:%M")
-        click.echo(f"{r['channel_id']:<22} {r['msg_count']:>8} {r['tokens']:>8} {updated}")
+        updated = datetime.fromtimestamp(r["updated_at"]).strftime("%m/%d %H:%M") if r["updated_at"] else "—"
+        tokens = f"{r['tokens']:,}t" if r["tokens"] else "0t"
+        click.echo(box_row(f"{r['channel_id'][:16]}  {r['msg_count']:>4} msgs  {tokens:>8}  {updated}"))
+    click.echo(box_bot())
+    click.echo()
 
 
 @sessions.command("view")
 @click.argument("channel_id")
-@click.option("--limit", "-n", default=20, help="Number of messages to show.")
+@click.option("--limit", "-n", default=20)
 def sessions_view(channel_id: str, limit: int) -> None:
     """View messages in a session."""
     if not DB_FILE.exists():
-        click.echo("No sessions database found.")
+        info("No sessions database.")
         return
 
     import sqlite3
     conn = sqlite3.connect(str(DB_FILE))
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        """SELECT role, content, name, timestamp FROM messages
-           WHERE channel_id = ? ORDER BY id DESC LIMIT ?""",
-        (channel_id, limit),
-    ).fetchall()
+    rows = conn.execute("""
+        SELECT role, name, content, timestamp FROM messages
+        WHERE channel_id = ? ORDER BY timestamp DESC LIMIT ?
+    """, (channel_id, limit)).fetchall()
     conn.close()
 
     if not rows:
-        click.echo(f"No messages in session {channel_id}.")
+        info(f"No messages for {channel_id}")
         return
 
     for r in reversed(rows):
@@ -352,7 +594,7 @@ def sessions_view(channel_id: str, limit: int) -> None:
         role = r["role"].upper()
         name = f" ({r['name']})" if r["name"] else ""
         content = (r["content"] or "")[:200]
-        click.echo(f"[{ts}] {role}{name}: {content}")
+        click.echo(f"  [{ts}] {role}{name}: {content}")
 
 
 @sessions.command("clear")
@@ -362,7 +604,7 @@ def sessions_view(channel_id: str, limit: int) -> None:
 def sessions_clear(channel_id: str | None, clear_all: bool) -> None:
     """Clear session(s)."""
     if not DB_FILE.exists():
-        click.echo("No sessions database found.")
+        info("No sessions database.")
         return
 
     import sqlite3
@@ -372,118 +614,74 @@ def sessions_clear(channel_id: str | None, clear_all: bool) -> None:
         conn.execute("DELETE FROM messages")
         conn.execute("DELETE FROM sessions")
         conn.commit()
-        click.echo("All sessions cleared.")
+        success("All sessions cleared.")
     elif channel_id:
         conn.execute("DELETE FROM messages WHERE channel_id = ?", (channel_id,))
         conn.execute("DELETE FROM sessions WHERE channel_id = ?", (channel_id,))
         conn.commit()
-        click.echo(f"Session {channel_id} cleared.")
+        success(f"Session {channel_id} cleared.")
     else:
-        click.echo("Specify a channel ID or use --all.")
+        fail("Specify a channel ID or use --all.")
 
     conn.close()
-
-
-# ── plug health ──────────────────────────────────────────────────────────
-
-@cli.command("health")
-def health() -> None:
-    """Run a one-shot health check."""
-    from plug.health import check_once
-
-    async def _check():
-        config = load_config()
-        proxy_url = config.models.proxy.base_url.replace("/v1", "")
-        statuses = await check_once(proxy_url=proxy_url)
-
-        click.echo("PLUG Health Check")
-        click.echo("=" * 40)
-        for name, status in sorted(statuses.items()):
-            icon = "✅" if status.healthy else "❌"
-            latency = f" ({status.latency_ms:.0f}ms)" if status.latency_ms else ""
-            click.echo(f"  {icon} {name}: {status.message}{latency}")
-
-        # Check bot process
-        pid = read_pidfile()
-        if pid:
-            try:
-                import os
-                os.kill(pid, 0)
-                click.echo(f"  ✅ bot: running (PID {pid})")
-            except ProcessLookupError:
-                click.echo(f"  ❌ bot: PID {pid} not found (stale pidfile)")
-        else:
-            click.echo("  ❌ bot: not running")
-
-        # Check cron
-        cron_db = CONFIG_DIR / "cron.db"
-        if cron_db.exists():
-            import sqlite3
-            conn = sqlite3.connect(str(cron_db))
-            count = conn.execute("SELECT COUNT(*) FROM cron_jobs WHERE enabled = 1").fetchone()[0]
-            conn.close()
-            click.echo(f"  ✅ cron: {count} active job(s)")
-        else:
-            click.echo("  ⚪ cron: no jobs")
-
-    asyncio.run(_check())
 
 
 # ── plug cron ────────────────────────────────────────────────────────────
 
 @cli.group()
 def cron() -> None:
-    """Manage cron jobs."""
+    """Manage scheduled jobs."""
     pass
 
 
 @cron.command("list")
-@click.option("--all", "show_all", is_flag=True, help="Include disabled jobs.")
-def cron_list(show_all: bool) -> None:
-    """List cron jobs."""
+def cron_list() -> None:
+    """List all cron jobs."""
     cron_db = CONFIG_DIR / "cron.db"
     if not cron_db.exists():
-        click.echo("No cron jobs.")
+        info("No cron jobs.")
         return
 
     import sqlite3
     conn = sqlite3.connect(str(cron_db))
     conn.row_factory = sqlite3.Row
-    sql = "SELECT * FROM cron_jobs"
-    if not show_all:
-        sql += " WHERE enabled = 1"
-    sql += " ORDER BY next_run ASC NULLS LAST"
-    rows = conn.execute(sql).fetchall()
+    try:
+        rows = conn.execute("SELECT * FROM cron_jobs ORDER BY name").fetchall()
+    except Exception:
+        info("No cron table.")
+        conn.close()
+        return
     conn.close()
 
     if not rows:
-        click.echo("No cron jobs.")
+        info("No cron jobs.")
         return
 
+    click.echo()
+    click.echo(box_top("Cron Jobs"))
     for r in rows:
-        status = "✅" if r["enabled"] else "❌"
+        status_icon = "🟢" if r["enabled"] else "⚪"
         name = r["name"] or r["id"][:8]
         kind = r["schedule_kind"]
         next_run = ""
         if r["next_run"]:
-            next_run = datetime.fromtimestamp(r["next_run"]).strftime("%Y-%m-%d %H:%M")
-        runs = r["run_count"]
-        click.echo(f"  {status} {name:<20} {kind:<6} next={next_run:<18} runs={runs}")
+            next_run = datetime.fromtimestamp(r["next_run"]).strftime("%m/%d %H:%M")
+        click.echo(box_row(f"{status_icon} {name:<16} {kind:<6} next: {next_run}"))
+    click.echo(box_bot())
+    click.echo()
 
 
 @cron.command("add")
 @click.option("--name", "-n", required=True, help="Job name.")
 @click.option("--schedule", "-s", required=True, help='Schedule: "30m", "1h", "*/5 * * * *", or ISO timestamp.')
-@click.option("--text", "-t", required=True, help="Payload text (message or agent prompt).")
+@click.option("--text", "-t", required=True, help="Payload text.")
 @click.option("--channel", "-c", help="Discord channel ID for delivery.")
-@click.option("--agent", is_flag=True, help="Run as agent_turn instead of system_event.")
-@click.option("--model", "-m", help="Model override for agent_turn.")
+@click.option("--agent", is_flag=True, help="Run as agent turn (LLM call).")
+@click.option("--model", "-m", help="Model override for agent turns.")
 def cron_add(name: str, schedule: str, text: str, channel: str, agent: bool, model: str) -> None:
     """Add a cron job."""
     from plug.cron.scheduler import CronStore, make_job
-    import uuid
 
-    # Parse schedule
     if schedule.endswith("m") and schedule[:-1].isdigit():
         kind, every_ms = "every", int(schedule[:-1]) * 60_000
         cron_expr, at_time = None, None
@@ -495,35 +693,28 @@ def cron_add(name: str, schedule: str, text: str, channel: str, agent: bool, mod
         every_ms, at_time = None, None
     else:
         try:
-            from datetime import datetime as dt
-            at_dt = dt.fromisoformat(schedule)
+            at_dt = datetime.fromisoformat(schedule)
             kind, at_time = "at", at_dt.timestamp()
             every_ms, cron_expr = None, None
         except ValueError:
-            click.echo(f"Invalid schedule: {schedule}")
+            fail(f"Invalid schedule: {schedule}")
             return
 
     job = make_job(
-        name=name,
-        schedule_kind=kind,
-        schedule_every_ms=every_ms,
-        schedule_cron_expr=cron_expr,
-        schedule_at=at_time,
+        name=name, schedule_kind=kind, schedule_every_ms=every_ms,
+        schedule_cron_expr=cron_expr, schedule_at=at_time,
         payload_kind="agent_turn" if agent else "system_event",
-        payload_text=text,
-        payload_model=model,
-        channel_id=channel,
+        payload_text=text, payload_model=model, channel_id=channel,
     )
 
     async def _add():
-        cron_db = CONFIG_DIR / "cron.db"
-        store = CronStore(cron_db)
+        store = CronStore(CONFIG_DIR / "cron.db")
         await store.open()
         await store.add(job)
         await store.close()
-        click.echo(f"✅ Added job: {name} ({kind})")
+        success(f"Job '{name}' added ({kind})")
         if job.next_run:
-            click.echo(f"   Next run: {datetime.fromtimestamp(job.next_run).strftime('%Y-%m-%d %H:%M:%S')}")
+            dim(f"Next run: {datetime.fromtimestamp(job.next_run).strftime('%Y-%m-%d %H:%M:%S')}")
 
     asyncio.run(_add())
 
@@ -533,26 +724,22 @@ def cron_add(name: str, schedule: str, text: str, channel: str, agent: bool, mod
 def cron_remove(job_id: str) -> None:
     """Remove a cron job by ID or name."""
     async def _remove():
-        cron_db = CONFIG_DIR / "cron.db"
         from plug.cron.scheduler import CronStore
-        store = CronStore(cron_db)
+        store = CronStore(CONFIG_DIR / "cron.db")
         await store.open()
-
-        # Try by ID first, then by name
         removed = await store.remove(job_id)
         if not removed:
             import sqlite3
-            conn = sqlite3.connect(str(cron_db))
+            conn = sqlite3.connect(str(CONFIG_DIR / "cron.db"))
             row = conn.execute("SELECT id FROM cron_jobs WHERE name = ?", (job_id,)).fetchone()
             conn.close()
             if row:
                 removed = await store.remove(row[0])
-
         await store.close()
         if removed:
-            click.echo(f"✅ Removed job: {job_id}")
+            success(f"Removed: {job_id}")
         else:
-            click.echo(f"Job not found: {job_id}")
+            fail(f"Not found: {job_id}")
 
     asyncio.run(_remove())
 
@@ -563,39 +750,37 @@ def cron_remove(job_id: str) -> None:
 def cron_runs(job_id: str, limit: int) -> None:
     """Show run history for a job."""
     async def _runs():
-        cron_db = CONFIG_DIR / "cron.db"
         from plug.cron.scheduler import CronStore
-        store = CronStore(cron_db)
+        store = CronStore(CONFIG_DIR / "cron.db")
         await store.open()
         runs = await store.get_runs(job_id, limit=limit)
         await store.close()
 
         if not runs:
-            click.echo("No runs.")
+            info("No runs.")
             return
 
         for r in runs:
-            ts = datetime.fromtimestamp(r["started_at"]).strftime("%Y-%m-%d %H:%M:%S")
-            status = r["status"]
-            err = f" — {r['error']}" if r.get("error") else ""
-            click.echo(f"  [{ts}] {status}{err}")
+            ts = datetime.fromtimestamp(r["started_at"]).strftime("%m/%d %H:%M:%S")
+            icon = "✓" if r["status"] == "ok" else "✗"
+            err = f"  {r['error']}" if r.get("error") else ""
+            click.echo(f"  {icon} [{ts}] {r['status']}{err}")
 
     asyncio.run(_runs())
 
 
-# ── plug install-service ─────────────────────────────────────────────────
+# ── plug install / uninstall ─────────────────────────────────────────────
 
-@cli.command("install-service")
+@cli.command()
 @click.option("--with-proxy", is_flag=True, help="Also install copilot-proxy service.")
-def install_service(with_proxy: bool) -> None:
-    """Generate and install systemd user service(s)."""
+def install(with_proxy: bool) -> None:
+    """Install PLUG as a systemd user service."""
     service_dir = Path.home() / ".config" / "systemd" / "user"
     service_dir.mkdir(parents=True, exist_ok=True)
 
     python_path = sys.executable
     plug_path = Path(__file__).resolve().parent.parent
 
-    # Main bot service
     bot_unit = f"""\
 [Unit]
 Description=PLUG Discord AI Gateway
@@ -606,15 +791,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={python_path} -m plug bot
+ExecStart={python_path} -m plug start --foreground
 WorkingDirectory={plug_path}
 Restart=always
 RestartSec=5
 StartLimitIntervalSec=300
 StartLimitBurst=10
 Environment=PYTHONUNBUFFERED=1
-
-# Hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
@@ -624,17 +807,15 @@ PrivateTmp=yes
 [Install]
 WantedBy=default.target
 """
-    bot_file = service_dir / "plug.service"
-    bot_file.write_text(bot_unit)
-    click.echo(f"✅ Bot service: {bot_file}")
+    (service_dir / "plug.service").write_text(bot_unit)
+    success("plug.service installed")
 
     if with_proxy:
         proxy_script = plug_path / "copilot_proxy.py"
         proxy_unit = f"""\
 [Unit]
-Description=PLUG Copilot Proxy (OpenAI-compatible)
+Description=PLUG Copilot Proxy
 After=network-online.target
-Wants=network-online.target
 
 [Service]
 Type=simple
@@ -645,8 +826,6 @@ RestartSec=5
 StartLimitIntervalSec=300
 StartLimitBurst=10
 Environment=PYTHONUNBUFFERED=1
-
-# Hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
@@ -656,35 +835,46 @@ PrivateTmp=yes
 [Install]
 WantedBy=default.target
 """
-        proxy_file = service_dir / "plug-proxy.service"
-        proxy_file.write_text(proxy_unit)
-        click.echo(f"✅ Proxy service: {proxy_file}")
+        (service_dir / "plug-proxy.service").write_text(proxy_unit)
+        success("plug-proxy.service installed")
 
-    click.echo("\nTo enable:")
-    click.echo("  systemctl --user daemon-reload")
+    click.echo()
+    info("Enable with:")
     if with_proxy:
-        click.echo("  systemctl --user enable --now plug-proxy plug")
+        dim("systemctl --user daemon-reload")
+        dim("systemctl --user enable --now plug-proxy plug")
     else:
-        click.echo("  systemctl --user enable --now plug")
-    click.echo("\nTo check:")
-    click.echo("  systemctl --user status plug")
-    click.echo("  journalctl --user -u plug -f")
-    if with_proxy:
-        click.echo("  systemctl --user status plug-proxy")
-        click.echo("  journalctl --user -u plug-proxy -f")
+        dim("systemctl --user daemon-reload")
+        dim("systemctl --user enable --now plug")
+    click.echo()
+
+
+@cli.command()
+def uninstall() -> None:
+    """Remove systemd services."""
+    service_dir = Path.home() / ".config" / "systemd" / "user"
+    removed = False
+    for name in ["plug.service", "plug-proxy.service"]:
+        f = service_dir / name
+        if f.exists():
+            f.unlink()
+            success(f"Removed {name}")
+            removed = True
+    if removed:
+        info("Run: systemctl --user daemon-reload")
+    else:
+        info("No services installed.")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 def _mask(secret: str, show: int = 4) -> str:
-    """Mask a secret string, showing only the last N characters."""
     if len(secret) <= show:
         return "***"
     return "***" + secret[-show:]
 
 
 def main() -> None:
-    """Entry point for the CLI."""
     cli()
 
 
