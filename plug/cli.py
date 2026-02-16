@@ -320,12 +320,116 @@ def stop() -> None:
 
 @cli.command()
 @click.option("--debug", is_flag=True)
+@click.option("--all", "restart_all", is_flag=True, help="Restart bot + proxy + systemd services.")
 @click.pass_context
-def restart(ctx: click.Context, debug: bool) -> None:
-    """Restart the PLUG bot."""
-    ctx.invoke(stop)
-    time.sleep(1)
-    ctx.invoke(start, foreground=False, debug=debug)
+def restart(ctx: click.Context, debug: bool, restart_all: bool) -> None:
+    """Restart PLUG. Use --all to restart all services systematically."""
+    import subprocess
+
+    if not restart_all:
+        ctx.invoke(stop)
+        time.sleep(1)
+        ctx.invoke(start, foreground=False, debug=debug)
+        return
+
+    click.echo()
+    click.echo(box_top("Full Restart"))
+    click.echo(box_row("Stopping all PLUG services..."))
+    click.echo(box_bot())
+    click.echo()
+
+    # 1. Kill bot (PID or systemd)
+    using_systemd = _systemd_active("plug")
+    using_proxy_systemd = _systemd_active("plug-proxy")
+
+    if using_systemd:
+        info("Stopping plug.service...")
+        subprocess.run(["systemctl", "--user", "stop", "plug"], capture_output=True)
+        success("plug.service stopped")
+    else:
+        pid = read_pidfile()
+        if pid:
+            info(f"Stopping bot (PID {pid})...")
+            try:
+                os.kill(pid, signal.SIGTERM)
+                _wait_pid(pid, timeout=15)
+                remove_pidfile()
+                success("Bot stopped")
+            except ProcessLookupError:
+                remove_pidfile()
+                success("Bot already stopped")
+        else:
+            info("Bot not running")
+
+    # 2. Kill proxy
+    if using_proxy_systemd:
+        info("Stopping plug-proxy.service...")
+        subprocess.run(["systemctl", "--user", "stop", "plug-proxy"], capture_output=True)
+        success("plug-proxy.service stopped")
+    else:
+        proxy_pids = _find_pids("copilot_proxy")
+        if proxy_pids:
+            for p in proxy_pids:
+                info(f"Stopping proxy (PID {p})...")
+                try:
+                    os.kill(p, signal.SIGTERM)
+                    _wait_pid(p, timeout=10)
+                    success(f"Proxy PID {p} stopped")
+                except ProcessLookupError:
+                    success(f"Proxy PID {p} already gone")
+        else:
+            info("Proxy not running")
+
+    # 3. Brief pause for sockets to release
+    time.sleep(2)
+
+    click.echo()
+    click.echo(box_top("Starting Services"))
+    click.echo(box_bot())
+    click.echo()
+
+    # 4. Start proxy first
+    if using_proxy_systemd:
+        info("Starting plug-proxy.service...")
+        subprocess.run(["systemctl", "--user", "start", "plug-proxy"], capture_output=True)
+        time.sleep(2)
+        if _systemd_active("plug-proxy"):
+            success("plug-proxy.service running")
+        else:
+            fail("plug-proxy.service failed to start")
+    else:
+        # Start proxy if copilot_proxy.py exists
+        proxy_script = Path(__file__).resolve().parent.parent / "copilot_proxy.py"
+        if proxy_script.exists():
+            info("Starting copilot proxy...")
+            subprocess.Popen(
+                [sys.executable, str(proxy_script)],
+                stdout=open(CONFIG_DIR / "proxy.log", "a"),
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            time.sleep(2)
+            new_pids = _find_pids("copilot_proxy")
+            if new_pids:
+                success(f"Proxy running (PID {new_pids[0]})")
+            else:
+                fail("Proxy failed to start. Check ~/.plug/proxy.log")
+
+    # 5. Start bot
+    if using_systemd:
+        info("Starting plug.service...")
+        subprocess.run(["systemctl", "--user", "start", "plug"], capture_output=True)
+        time.sleep(2)
+        if _systemd_active("plug"):
+            success("plug.service running")
+        else:
+            fail("plug.service failed to start")
+    else:
+        ctx.invoke(start, foreground=False, debug=debug)
+
+    # 6. Health check
+    click.echo()
+    ctx.invoke(health)
 
 
 # ── plug status ──────────────────────────────────────────────────────────
@@ -872,6 +976,43 @@ def _mask(secret: str, show: int = 4) -> str:
     if len(secret) <= show:
         return "***"
     return "***" + secret[-show:]
+
+
+def _systemd_active(unit: str) -> bool:
+    """Check if a systemd user unit is active."""
+    import subprocess
+    result = subprocess.run(
+        ["systemctl", "--user", "is-active", unit],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() == "active"
+
+
+def _find_pids(name: str) -> list[int]:
+    """Find PIDs matching a process name pattern."""
+    import subprocess
+    result = subprocess.run(
+        ["pgrep", "-f", name], capture_output=True, text=True,
+    )
+    pids = []
+    for line in result.stdout.strip().split("\n"):
+        line = line.strip()
+        if line and line.isdigit():
+            pid = int(line)
+            if pid != os.getpid():
+                pids.append(pid)
+    return pids
+
+
+def _wait_pid(pid: int, timeout: int = 15) -> bool:
+    """Wait for a PID to exit. Returns True if exited, False if timed out."""
+    for _ in range(timeout * 2):
+        try:
+            os.kill(pid, 0)
+            time.sleep(0.5)
+        except ProcessLookupError:
+            return True
+    return False
 
 
 def main() -> None:
