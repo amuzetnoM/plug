@@ -33,6 +33,7 @@ from plug.tools.definitions import TOOL_DEFINITIONS
 from plug.tools.executor import ToolExecutor
 from plug.cron.scheduler import CronStore, CronScheduler, CronJob
 from plug.agents.manager import AgentManager
+from plug.health import HealthChecker
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ class PlugBot:
         self.cron_store: CronStore | None = None
         self.cron_scheduler: CronScheduler | None = None
         self.agent_manager: AgentManager | None = None
+        self.health: HealthChecker | None = None
 
         # State
         self._processing: set[str] = set()  # channel IDs currently being processed
@@ -126,6 +128,12 @@ class PlugBot:
             max_concurrent=self.config.agent.max_subagents if hasattr(self.config.agent, 'max_subagents') else 5,
         )
 
+        # Health checker
+        self.health = HealthChecker(
+            proxy_url=self.config.models.proxy.base_url.replace("/v1", ""),
+            check_interval=30.0,
+        )
+
         # Handle graceful shutdown
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -145,6 +153,8 @@ class PlugBot:
 
         if self.cron_scheduler:
             self.cron_scheduler.stop()
+        if self.health:
+            self.health.stop()
         if self.agent_manager:
             await self.agent_manager.cancel_all()
         if self.cron_store:
@@ -180,6 +190,11 @@ class PlugBot:
         if self.cron_scheduler:
             self.cron_scheduler.start()
             logger.info("Cron scheduler started")
+
+        # Start health checker
+        if self.health:
+            self.health.start()
+            logger.info("Health checker started")
 
     async def on_message(self, message: DiscordMessage) -> None:
         """Handle incoming Discord messages."""

@@ -384,6 +384,51 @@ def sessions_clear(channel_id: str | None, clear_all: bool) -> None:
     conn.close()
 
 
+# ── plug health ──────────────────────────────────────────────────────────
+
+@cli.command("health")
+def health() -> None:
+    """Run a one-shot health check."""
+    from plug.health import check_once
+
+    async def _check():
+        config = load_config()
+        proxy_url = config.models.proxy.base_url.replace("/v1", "")
+        statuses = await check_once(proxy_url=proxy_url)
+
+        click.echo("PLUG Health Check")
+        click.echo("=" * 40)
+        for name, status in sorted(statuses.items()):
+            icon = "✅" if status.healthy else "❌"
+            latency = f" ({status.latency_ms:.0f}ms)" if status.latency_ms else ""
+            click.echo(f"  {icon} {name}: {status.message}{latency}")
+
+        # Check bot process
+        pid = read_pidfile()
+        if pid:
+            try:
+                import os
+                os.kill(pid, 0)
+                click.echo(f"  ✅ bot: running (PID {pid})")
+            except ProcessLookupError:
+                click.echo(f"  ❌ bot: PID {pid} not found (stale pidfile)")
+        else:
+            click.echo("  ❌ bot: not running")
+
+        # Check cron
+        cron_db = CONFIG_DIR / "cron.db"
+        if cron_db.exists():
+            import sqlite3
+            conn = sqlite3.connect(str(cron_db))
+            count = conn.execute("SELECT COUNT(*) FROM cron_jobs WHERE enabled = 1").fetchone()[0]
+            conn.close()
+            click.echo(f"  ✅ cron: {count} active job(s)")
+        else:
+            click.echo("  ⚪ cron: no jobs")
+
+    asyncio.run(_check())
+
+
 # ── plug cron ────────────────────────────────────────────────────────────
 
 @cli.group()
@@ -541,20 +586,23 @@ def cron_runs(job_id: str, limit: int) -> None:
 # ── plug install-service ─────────────────────────────────────────────────
 
 @cli.command("install-service")
-def install_service() -> None:
-    """Generate and install a systemd user service."""
+@click.option("--with-proxy", is_flag=True, help="Also install copilot-proxy service.")
+def install_service(with_proxy: bool) -> None:
+    """Generate and install systemd user service(s)."""
     service_dir = Path.home() / ".config" / "systemd" / "user"
     service_dir.mkdir(parents=True, exist_ok=True)
-    service_file = service_dir / "plug.service"
 
     python_path = sys.executable
     plug_path = Path(__file__).resolve().parent.parent
 
-    unit = f"""\
+    # Main bot service
+    bot_unit = f"""\
 [Unit]
 Description=PLUG Discord AI Gateway
 After=network-online.target
 Wants=network-online.target
+{f"Requires=plug-proxy.service" if with_proxy else ""}
+{f"After=plug-proxy.service" if with_proxy else ""}
 
 [Service]
 Type=simple
@@ -562,20 +610,68 @@ ExecStart={python_path} -m plug bot
 WorkingDirectory={plug_path}
 Restart=always
 RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
 Environment=PYTHONUNBUFFERED=1
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.plug %h/workspace
+PrivateTmp=yes
 
 [Install]
 WantedBy=default.target
 """
+    bot_file = service_dir / "plug.service"
+    bot_file.write_text(bot_unit)
+    click.echo(f"✅ Bot service: {bot_file}")
 
-    service_file.write_text(unit)
-    click.echo(f"✅ Service file written to {service_file}")
+    if with_proxy:
+        proxy_script = plug_path / "copilot_proxy.py"
+        proxy_unit = f"""\
+[Unit]
+Description=PLUG Copilot Proxy (OpenAI-compatible)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={python_path} {proxy_script}
+WorkingDirectory={plug_path}
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+Environment=PYTHONUNBUFFERED=1
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.copilot-proxy
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target
+"""
+        proxy_file = service_dir / "plug-proxy.service"
+        proxy_file.write_text(proxy_unit)
+        click.echo(f"✅ Proxy service: {proxy_file}")
+
     click.echo("\nTo enable:")
     click.echo("  systemctl --user daemon-reload")
-    click.echo("  systemctl --user enable --now plug")
+    if with_proxy:
+        click.echo("  systemctl --user enable --now plug-proxy plug")
+    else:
+        click.echo("  systemctl --user enable --now plug")
     click.echo("\nTo check:")
     click.echo("  systemctl --user status plug")
     click.echo("  journalctl --user -u plug -f")
+    if with_proxy:
+        click.echo("  systemctl --user status plug-proxy")
+        click.echo("  journalctl --user -u plug-proxy -f")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
