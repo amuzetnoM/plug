@@ -1,235 +1,193 @@
-<p align="center">
-  <img src="https://img.shields.io/badge/PLUG-Discord_AI_Gateway-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="PLUG"/>
-</p>
+# ⚡ Plug
 
-<h1 align="center">⚡ PLUG</h1>
+<div align="center">
 
-<p align="center">
-  <em>One process. Multiple personalities. Zero cloud dependency.</em>
-</p>
+![Status](https://img.shields.io/badge/status-production-brightgreen)
+![Python](https://img.shields.io/badge/python-3.11+-blue)
+![Discord](https://img.shields.io/badge/discord-bot-5865F2)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-<p align="center">
-  <a href="#quick-start">Quick Start</a> •
-  <a href="#features">Features</a> •
-  <a href="#multi-agent-router">Multi-Agent Router</a> •
-  <a href="#architecture">Architecture</a> •
-  <a href="#copilot-proxy">Copilot Proxy</a> •
-  <a href="#tools">Tools</a>
-</p>
+**Multi-agent Discord AI gateway with channel-routed personas.**
 
-<p align="center">
-  <img src="https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white" alt="Python"/>
-  <img src="https://img.shields.io/badge/discord.py-2.4+-5865F2?logo=discord&logoColor=white" alt="discord.py"/>
-  <img src="https://img.shields.io/badge/models-Claude%20%7C%20GPT%20%7C%20Gemini%20%7C%20Ollama-orange" alt="Models"/>
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT"/>
-</p>
+*One bot. Many minds. Zero conflicts.*
+
+</div>
 
 ---
 
-PLUG is a Discord AI gateway that gives your server intelligent agents with tool calling, persistent memory, and automatic context management. No sprawling plugin systems, no fragile reconnection logic, no surprises.
+## What Is This?
 
-One bot process can run **multiple agent personas** — each with its own personality, workspace, model preference, and channel binding. Deploy a full executive team, a research squad, or a support crew from a single config file.
+Plug is a Discord bot that runs multiple AI personas through a single gateway. Each Discord channel maps to a different agent with its own identity, system prompt, model, and workspace.
 
-Built by [AVA](https://github.com/amuzetnoM) at [Artifact Virtual](https://github.com/Artifact-Virtual).
+**Production deployment:** Artifact Virtual's C-Suite — 5 AI executives coordinated through Discord.
 
-## Features
-
-| | Feature | Details |
-|---|---|---|
-| 🧠 | **Multi-Agent Router** | Channel-based persona routing — one bot, many personalities |
-| 🔌 | **OpenAI-Compatible** | Works with any provider: GitHub Copilot, Ollama, LM Studio, OpenRouter |
-| 🛠️ | **Tool Calling** | Shell execution, file I/O, web fetch, memory search — full agent loop |
-| 💾 | **Persistent Sessions** | SQLite-backed conversation history per channel (WAL mode) |
-| 📦 | **Context Compaction** | Automatic LLM summarization when conversations exceed token limits |
-| 🔄 | **Model Fallback Chain** | Graceful failover across multiple models with retry + backoff |
-| ⏰ | **Cron Scheduler** | Built-in scheduled jobs with persistent state |
-| 🏥 | **Health Checker** | Auto-recovery for provider outages |
-| 🧩 | **Sub-Agents** | Spawn isolated background tasks with result delivery |
-| 📝 | **Message Chunking** | Code-block-aware splitting for Discord's 2000 char limit |
-| 🔒 | **Access Control** | Mention-only guilds, DM allowlists, channel-scoped personas |
-| 🐙 | **Daemon Mode** | Double-fork daemon with PID management, or systemd service |
-
-## Quick Start
-
-```bash
-git clone https://github.com/amuzetnoM/plug.git
-cd plug
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
-
-# Configure
-plug setup
-
-# Run
-plug start
 ```
-
-## Multi-Agent Router
-
-PLUG's killer feature: **route different Discord channels to different agent personas**. Each persona gets its own system prompt, workspace, and model.
-
-```json
-{
-  "router": {
-    "personas": [
-      {
-        "name": "CTO",
-        "channel_ids": ["123456789"],
-        "workspace": "/path/to/cto/workspace",
-        "system_prompt_files": ["AGENTS.md"],
-        "model": "claude-sonnet-4.6"
-      },
-      {
-        "name": "CISO",
-        "channel_ids": ["987654321"],
-        "workspace": "/path/to/ciso/workspace",
-        "system_prompt_files": ["AGENTS.md"],
-        "model": "claude-sonnet-4.6"
-      }
-    ],
-    "default_persona": "CTO"
-  }
-}
+#ava-command  →  AVA (Coordinator)     Claude Opus 4.6
+#cto          →  CTO (Engineering)     Claude Sonnet 4.6
+#coo          →  COO (Operations)      Claude Sonnet 4.6
+#cfo          →  CFO (Finance)         Claude Sonnet 4.6
+#ciso         →  CISO (Security)       Claude Sonnet 4.6
 ```
-
-Each persona:
-- **Loads its own `AGENTS.md`** from its workspace directory
-- **Uses its own model** (mix Claude, GPT, Gemini, or local models)
-- **Maintains separate session history** (isolated by channel)
-- **Only responds in its mapped channels** — no crosstalk
-
-Deploy an entire C-suite, research team, or support squad from one process.
 
 ## Architecture
 
 ```
-plug/
-├── bot/
-│   ├── client.py        # Discord bot — agent loop, message routing, typing indicators
-│   └── chunker.py       # Code-block-aware message splitting
-├── models/
-│   ├── base.py          # Abstract provider, message types, ProviderChain with fallback
-│   ├── proxy.py         # OpenAI-compatible proxy provider
-│   ├── copilot.py       # GitHub Copilot direct auth (zero-config)
-│   └── ollama.py        # Local Ollama provider
-├── sessions/
-│   ├── store.py         # SQLite session persistence (WAL mode, async)
-│   └── compactor.py     # Token-aware context compaction via LLM summarization
-├── agents/
-│   └── manager.py       # Sub-agent spawner with concurrency control
-├── cron/
-│   └── scheduler.py     # Persistent cron jobs with SQLite backing
-├── tools/
-│   ├── definitions.py   # OpenAI function-calling tool schemas
-│   └── executor.py      # Sandboxed tool execution
-├── router.py            # 🆕 Multi-agent channel router (AgentRouter + AgentPersona)
-├── health.py            # Component health monitoring + auto-recovery
-├── cli.py               # Click CLI — start, stop, status, setup, sessions, config, cron
-├── config.py            # Pydantic v2 configuration
-├── daemon.py            # Daemon lifecycle (double-fork, PID, signals)
-└── prompt.py            # System prompt loader from workspace files
+Discord Gateway
+      │
+      ▼
+┌──────────────┐     ┌──────────────┐
+│  Plug Client │────▶│ AgentRouter  │
+│              │     │              │
+│  on_message  │     │ channel_id → │
+│  on_ready    │     │   persona    │
+└──────┬───────┘     └──────┬───────┘
+       │                    │
+       ▼                    ▼
+┌──────────────┐     ┌──────────────┐
+│   Provider   │     │   Session    │
+│    Chain     │     │    Store     │
+│              │     │              │
+│ Copilot Proxy│     │   SQLite     │
+│ → Ollama     │     │ per-channel  │
+└──────┬───────┘     └──────────────┘
+       │
+       ▼
+┌──────────────┐     ┌──────────────┐
+│    Tools     │     │     Cron     │
+│              │     │  Scheduler   │
+│  exec        │     │              │
+│  read_file   │     │ Standing     │
+│  write_file  │     │ Orders       │
+│  web_search  │     │ agent_turn   │
+└──────────────┘     └──────────────┘
 ```
 
-## Copilot Proxy
+## Key Features
 
-PLUG includes a minimal proxy (`copilot_proxy.py`) that exposes your GitHub Copilot subscription as an OpenAI-compatible API:
+### 🔀 AgentRouter — Multi-Persona Routing
+One Discord bot token, multiple AI personalities. Each channel routes to a different agent persona with isolated:
+- System prompts (from workspace `AGENTS.md`)
+- Model selection (Opus for coordinators, Sonnet for workers)
+- Session history (SQLite, per-channel)
+- Tool access (shared executor)
+
+### ⏰ Cron Scheduler — Autonomous Standing Orders
+SQLite-backed cron system with `agent_turn` payloads. Executives run periodic health checks, status reports, and audits autonomously — no human trigger needed.
+
+### 🔧 Tool Execution — Real Work
+Agents have `exec`, `read_file`, `write_file`, `web_search`. They run shell commands, read codebases, write reports. Multi-round tool loops (up to 15 rounds per request).
+
+### 📨 Webhook Dispatch — Task Distribution
+Accepts webhook messages as task dispatches. AVA (OpenClaw) sends structured tasks via webhooks, Plug routes them to the right persona.
+
+### 🏥 Health Checker — Self-Monitoring
+Periodic health checks with automatic recovery. Watchdog timer restarts crashed services.
+
+### 🧠 Session Compaction — Memory Management
+Automatic conversation summarization when sessions exceed token limits.
+
+## Setup
 
 ```bash
-python3 copilot_proxy.py        # Starts on localhost:3000
-```
+# Clone
+git clone https://github.com/amuzetnoM/plug.git
+cd plug
 
-This gives you access to **Claude Opus 4.6, Sonnet 4.6, GPT-5, Gemini 3 Pro**, and more through your existing Copilot subscription. No additional API keys. No additional cost.
+# Install
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .
 
-The proxy auto-discovers your GitHub token from `gh auth` or `~/.config/github-copilot/hosts.json`.
+# Configure
+cp config.example.json ~/.plug/config.json
+# Edit config.json with your Discord bot token, model endpoints, router personas
 
-## Commands
+# Run
+plug start
 
-```bash
-plug start              # Start bot (daemon mode)
-plug stop               # Stop daemon
-plug restart            # Restart daemon
-plug status             # Health, sessions, uptime dashboard
-
-plug setup              # Interactive first-time configuration
-plug config             # Show current config (secrets masked)
-
-plug sessions list      # List all sessions
-plug sessions view ID   # View messages in a session
-plug sessions clear     # Clear session(s)
-
-plug cron list          # List scheduled jobs
-plug cron add           # Add a cron job
-
-plug health             # Run health checks
-plug install            # Generate systemd user service
+# Or with systemd (production)
+systemctl --user enable plug-csuite
+systemctl --user start plug-csuite
 ```
 
 ## Configuration
 
-Config lives at `~/.plug/config.json`. Created by `plug setup` or manually:
-
 ```json
 {
+  "discord": { "token": "..." },
   "models": {
-    "primary": "claude-sonnet-4.6",
-    "fallbacks": ["claude-opus-4.6", "gpt-5.2"],
-    "proxy": {
-      "base_url": "http://localhost:3000/v1",
-      "timeout": 120.0
-    },
-    "temperature": 0.5,
-    "max_tokens": 4096
+    "provider": "openai",
+    "endpoint": "http://localhost:3000/v1",
+    "default_model": "claude-sonnet-4.6"
   },
-  "discord": {
-    "token": "your-bot-token",
-    "guild_ids": ["your-guild-id"],
-    "require_mention": false,
-    "dm_policy": "allowlist",
-    "dm_allowlist": ["your-user-id"],
-    "status_message": "🏛️ Online"
-  },
-  "agent": {
-    "workspace": "/path/to/workspace",
-    "system_prompt_files": ["SOUL.md", "AGENTS.md"]
-  },
-  "compaction": {
-    "enabled": true,
-    "max_context_tokens": 50000,
-    "target_tokens": 30000
+  "router": {
+    "personas": [
+      {
+        "name": "CTO",
+        "channel_id": "123456789",
+        "model": "claude-sonnet-4.6",
+        "workspace": "/path/to/cto/workspace",
+        "system_prompt_files": ["AGENTS.md"]
+      }
+    ]
   }
 }
 ```
 
-## Tools
+## Project Structure
 
-| Tool | Description |
-|------|-------------|
-| `exec` | Run shell commands with timeout and output limits |
-| `read_file` | Read files with offset/limit support |
-| `write_file` | Create or overwrite files |
-| `edit_file` | Surgical find-and-replace edits |
-| `web_fetch` | Fetch and extract readable content from URLs |
-| `memory_search` | Search local knowledge base (BM25 + vector hybrid) |
-| `list_dir` | List directory contents |
+```
+plug/
+├── plug/
+│   ├── bot/
+│   │   ├── client.py       # Discord client + message handling + tool loop
+│   │   └── chunker.py      # Discord message chunking (2000 char limit)
+│   ├── models/
+│   │   ├── base.py         # ProviderChain (OpenAI → Ollama fallback)
+│   │   └── proxy.py        # Copilot proxy integration
+│   ├── router.py           # AgentRouter — channel → persona mapping
+│   ├── sessions/
+│   │   ├── store.py        # SQLite session store
+│   │   └── compactor.py    # Session summarization
+│   ├── tools/
+│   │   ├── definitions.py  # Tool schemas (OpenAI function-calling format)
+│   │   └── executor.py     # Tool execution engine
+│   ├── cron/
+│   │   └── scheduler.py    # SQLite-backed cron with agent_turn support
+│   ├── health.py           # Health checker
+│   ├── config.py           # Configuration management
+│   ├── cli.py              # CLI entry point
+│   └── daemon.py           # Daemon mode
+├── copilot_proxy.py        # GitHub Copilot → OpenAI-compatible proxy
+└── README.md
+```
 
-## Why PLUG?
+## Copilot Proxy
 
-PLUG is ~60% of what heavyweight platforms offer for ~5% of the complexity. No TypeScript transpilation, no Docker required, no plugin marketplace to navigate. One clean Python codebase you can read top-to-bottom in an afternoon.
+Plug includes a proxy that converts GitHub Copilot's API into an OpenAI-compatible endpoint. 42 models (Claude, GPT, Gemini) at zero additional API cost.
 
-The missing 40%? Channel integrations beyond Discord and browser automation. Those are buildable when you need them. Most people don't.
+```bash
+python3 copilot_proxy.py  # Serves on localhost:3000
+```
 
-## Requirements
+## Production Deployment
 
-- Python 3.11+
-- A Discord bot token ([create one here](https://discord.com/developers/applications))
-- An OpenAI-compatible API endpoint (or use the included Copilot proxy)
+Artifact Virtual runs Plug as a systemd service with three-layer reliability:
 
-## License
+1. **systemd** — `Restart=always`, auto-start on boot
+2. **Watchdog timer** — checks every 2 minutes, restarts if dead
+3. **Health checker** — in-process monitoring every 30 seconds
 
-MIT
+```bash
+# Services
+systemctl --user status copilot-proxy   # Model provider
+systemctl --user status plug-csuite     # C-Suite gateway
+systemctl --user status csuite-watchdog # Watchdog timer
+```
 
 ---
 
-<p align="center">
-  <em>Built with ⚡ by <a href="https://github.com/Artifact-Virtual">Artifact Virtual</a></em>
-</p>
+<div align="center">
+
+Built for [Artifact Virtual](https://github.com/Artifact-Virtual) 🏛️
+
+</div>
