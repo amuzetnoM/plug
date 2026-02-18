@@ -28,6 +28,7 @@ class AgentPersona:
     workspace: str
     system_prompt_files: list[str] = field(default_factory=lambda: ["AGENTS.md"])
     model: Optional[str] = None  # None = use default
+    base_url: Optional[str] = None  # None = use default proxy
     temperature: float = 0.5
     max_tokens: int = 4096
 

@@ -39,7 +39,7 @@ from plug.router import AgentRouter, AgentPersona
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 15  # Safety limit for tool-call loops
+MAX_TOOL_ROUNDS = 40  # Safety limit for tool-call loops
 
 
 class PlugBot:
@@ -68,6 +68,7 @@ class PlugBot:
         self.agent_manager: AgentManager | None = None
         self.health: HealthChecker | None = None
         self.router: AgentRouter | None = None
+        self._persona_chains: dict[str, ProviderChain] = {}  # persona_name → chain
 
         # State
         self._processing: set[str] = set()  # channel IDs currently being processed
@@ -392,7 +393,8 @@ class PlugBot:
             async with discord_message.channel.typing():
                 try:
                     model_override = self._get_model_for_channel(channel_id)
-                    response = await self.chain.chat(
+                    chain = self._get_chain_for_channel(channel_id)
+                    response = await chain.chat(
                         conversation,
                         model=model_override,
                         tools=TOOL_DEFINITIONS,
@@ -408,8 +410,23 @@ class PlugBot:
             await self.store.add_message(channel_id, assistant_msg, token_count=assistant_tokens)
             conversation.append(assistant_msg)
 
-            # If no tool calls, we're done
+            # If no tool calls, check if the model is expressing intent to continue
             if not response.has_tool_calls:
+                content = (assistant_msg.content or "").lower()
+                continuation_signals = [
+                    "let me ", "now i'll ", "now i will", "i'll create",
+                    "i'll write", "i'll run", "let me create", "let me write",
+                    "let me run", "simultaneously", "i need to", "i'll start",
+                    "now let me", "i have enough", "i have all the",
+                ]
+                is_continuation = any(sig in content for sig in continuation_signals)
+                if is_continuation and round_num < MAX_TOOL_ROUNDS - 2:
+                    logger.info("Round %d: text-only but continuation intent detected, injecting nudge", round_num)
+                    # Nudge the model to actually use tools
+                    nudge = Message(role="user", content="Use your tools now. Do not describe what you'll do — call the tool directly.")
+                    conversation.append(nudge)
+                    await self.store.add_message(channel_id, nudge, token_count=20)
+                    continue
                 return assistant_msg.content or ""
 
             # Execute tool calls
@@ -471,6 +488,25 @@ class PlugBot:
             if persona and persona.model:
                 return persona.model
         return None
+
+    def _get_chain_for_channel(self, channel_id: str) -> ProviderChain:
+        """Get a per-persona ProviderChain if persona has a custom base_url."""
+        if self.router:
+            persona = self.router.route(channel_id)
+            if persona and persona.base_url:
+                if persona.name not in self._persona_chains:
+                    from plug.models.proxy import ProxyChatProvider
+                    proxy = ProxyChatProvider(
+                        base_url=persona.base_url,
+                        api_key="n/a",
+                        timeout=120.0,
+                        default_model=persona.model or self.config.models.primary,
+                    )
+                    models = [persona.model or self.config.models.primary] + self.config.models.fallbacks
+                    self._persona_chains[persona.name] = ProviderChain(proxy, models)
+                    logger.info("Created dedicated proxy chain for %s at %s", persona.name, persona.base_url)
+                return self._persona_chains[persona.name]
+        return self.chain
 
     # ── Response handling ────────────────────────────────────────────────
 
