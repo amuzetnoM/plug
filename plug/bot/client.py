@@ -241,9 +241,15 @@ class PlugBot:
         if message.author == self.client.user:
             return
 
-        # Ignore bots
+        # Ignore bots (except webhook dispatches in routed channels)
         if message.author.bot:
-            return
+            is_webhook_dispatch = (
+                hasattr(message, 'webhook_id') and message.webhook_id
+                and self.router
+                and self.router.route(str(message.channel.id)) is not None
+            )
+            if not is_webhook_dispatch:
+                return
 
         # Check if we should respond
         if not self._should_respond(message):
@@ -499,20 +505,36 @@ class PlugBot:
             return job.payload_text
 
         elif job.payload_kind == "agent_turn":
-            # Run a full agent turn and deliver the result
-            result = await self._run_subagent(job.payload_text, job.payload_model, job.payload_timeout)
+            # Run a full agent turn with persona routing and deliver the result
+            result = await self._run_subagent(
+                job.payload_text, job.payload_model, job.payload_timeout,
+                channel_id=job.channel_id,
+            )
             if job.channel_id:
                 await self._deliver_to_channel(job.channel_id, f"⏰ **Cron** `{job.name}`:\n\n{result}")
             return result
 
         return f"Unknown payload kind: {job.payload_kind}"
 
-    async def _run_subagent(self, task: str, model: str | None, timeout: float) -> str:
+    async def _run_subagent(self, task: str, model: str | None, timeout: float,
+                            channel_id: str | None = None) -> str:
         """Run an isolated agent turn (for sub-agents and cron agent_turn payloads)."""
         # Build a minimal conversation with system prompt + task
         conversation = []
-        if self._system_prompt:
-            conversation.append(Message(role="system", content=self._system_prompt))
+
+        # Use persona-specific system prompt if channel is routed
+        system_prompt = self._system_prompt
+        if channel_id and self.router:
+            persona = self.router.route(channel_id)
+            if persona:
+                persona_prompt = persona.system_prompt
+                if persona_prompt:
+                    system_prompt = persona_prompt
+                    if not model and persona.model:
+                        model = persona.model
+
+        if system_prompt:
+            conversation.append(Message(role="system", content=system_prompt))
         conversation.append(Message(role="user", content=task))
 
         # Run agent loop (reuse the same logic but without Discord message context)
