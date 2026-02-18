@@ -251,6 +251,19 @@ class PlugBot:
             if not is_webhook_dispatch:
                 return
 
+        # C-Suite channels: ignore @mentions (those are for AVA/OpenClaw),
+        # only respond to plain messages
+        if self.router and self.client.user:
+            channel_id = str(message.channel.id)
+            persona = self.router.route(channel_id)
+            if persona:
+                mentioned = any(
+                    user.id == self.client.user.id
+                    for user in message.mentions
+                )
+                if mentioned:
+                    return  # @mention = talking to AVA, not C-suite
+
         # Check if we should respond
         if not self._should_respond(message):
             return
