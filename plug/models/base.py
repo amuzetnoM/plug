@@ -182,6 +182,7 @@ class ProviderChain:
         self,
         messages: list[Message],
         *,
+        model: str | None = None,
         tools: list[dict] | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
@@ -191,18 +192,19 @@ class ProviderChain:
 
         last_error: Exception | None = None
 
+        # If a specific model is requested, try it first
+        models_to_try = [model] + self.models if model else self.models
+
         # Try primary provider (with retry)
-        for i in range(len(self.models)):
-            idx = (self._current_index + i) % len(self.models)
-            model = self.models[idx]
+        for i in range(len(models_to_try)):
+            m = models_to_try[i]
 
             for attempt in range(self.max_retries):
                 try:
                     response = await self.provider.chat(
-                        messages, model=model, tools=tools,
+                        messages, model=m, tools=tools,
                         temperature=temperature, max_tokens=max_tokens,
                     )
-                    self._current_index = idx
                     return response
                 except Exception as e:
                     last_error = e

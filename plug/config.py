@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-CONFIG_DIR = Path.home() / ".plug"
+CONFIG_DIR = Path(os.environ.get("PLUG_HOME", str(Path.home() / ".plug")))
 CONFIG_FILE = CONFIG_DIR / "config.json"
 DB_FILE = CONFIG_DIR / "sessions.db"
 PID_FILE = CONFIG_DIR / "plug.pid"
@@ -80,6 +81,7 @@ class DaemonConfig(BaseModel):
 
 
 class PlugConfig(BaseModel):
+    model_config = {"extra": "allow"}
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)

@@ -35,6 +35,7 @@ from plug.tools.executor import ToolExecutor
 from plug.cron.scheduler import CronStore, CronScheduler, CronJob
 from plug.agents.manager import AgentManager
 from plug.health import HealthChecker
+from plug.router import AgentRouter, AgentPersona
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ class PlugBot:
         self.cron_scheduler: CronScheduler | None = None
         self.agent_manager: AgentManager | None = None
         self.health: HealthChecker | None = None
+        self.router: AgentRouter | None = None
 
         # State
         self._processing: set[str] = set()  # channel IDs currently being processed
@@ -138,6 +140,14 @@ class PlugBot:
             self.config.agent.workspace,
             self.config.agent.system_prompt_files,
         )
+
+        # Multi-agent router (channel → persona mapping)
+        router_cfg = getattr(self.config, '_raw', {}).get('router')
+        if not router_cfg and hasattr(self.config, 'model_extra'):
+            router_cfg = self.config.model_extra.get('router')
+        if router_cfg:
+            self.router = AgentRouter.from_config(router_cfg)
+            logger.info("Router loaded: %d personas", len(self.router.list_personas()))
 
         # Cron scheduler
         cron_db = DB_FILE.parent / "cron.db"
@@ -286,6 +296,13 @@ class PlugBot:
             if guild_id not in self.config.discord.guild_ids:
                 return False
 
+        # If router is active, only respond in mapped channels
+        channel_id = str(message.channel.id)
+        if self.router:
+            persona = self.router.route(channel_id)
+            if not persona:
+                return False  # Not a C-suite channel, ignore
+
         # Check mention requirement
         if self.config.discord.require_mention:
             if not self.client.user:
@@ -349,8 +366,10 @@ class PlugBot:
             # Show typing indicator
             async with discord_message.channel.typing():
                 try:
+                    model_override = self._get_model_for_channel(channel_id)
                     response = await self.chain.chat(
                         conversation,
+                        model=model_override,
                         tools=TOOL_DEFINITIONS,
                         temperature=self.config.models.temperature,
                         max_tokens=self.config.models.max_tokens,
@@ -398,19 +417,35 @@ class PlugBot:
     async def _build_conversation(self, channel_id: str) -> list[Message]:
         """Build the full conversation for the API call.
 
-        Prepends system prompt, then all active messages.
+        Prepends system prompt (from router persona if available), then all active messages.
         """
         messages: list[Message] = []
 
-        # System prompt
-        if self._system_prompt:
-            messages.append(Message(role="system", content=self._system_prompt))
+        # System prompt — use persona-specific if router matches
+        system_prompt = self._system_prompt
+        persona = self.router.route(channel_id) if self.router else None
+        if persona:
+            persona_prompt = persona.system_prompt
+            if persona_prompt:
+                system_prompt = persona_prompt
+                logger.debug("Using persona %s for channel %s", persona.name, channel_id)
+
+        if system_prompt:
+            messages.append(Message(role="system", content=system_prompt))
 
         # Session history
         history = await self.store.get_messages(channel_id)
         messages.extend(history)
 
         return messages
+
+    def _get_model_for_channel(self, channel_id: str) -> str | None:
+        """Get the model override for a channel via router persona."""
+        if self.router:
+            persona = self.router.route(channel_id)
+            if persona and persona.model:
+                return persona.model
+        return None
 
     # ── Response handling ────────────────────────────────────────────────
 
