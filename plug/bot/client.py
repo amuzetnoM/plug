@@ -243,13 +243,17 @@ class PlugBot:
 
         # Ignore bots (except webhook dispatches in routed channels)
         if message.author.bot:
+            webhook_id = getattr(message, 'webhook_id', None)
+            channel_id = str(message.channel.id)
             is_webhook_dispatch = (
-                hasattr(message, 'webhook_id') and message.webhook_id
+                webhook_id is not None
                 and self.router
-                and self.router.route(str(message.channel.id)) is not None
+                and self.router.route(channel_id) is not None
             )
             if not is_webhook_dispatch:
+                logger.debug("Ignoring bot message in %s (webhook_id=%s)", channel_id, webhook_id)
                 return
+            logger.info("Accepting webhook dispatch in %s (webhook_id=%s)", channel_id, webhook_id)
 
         # C-Suite channels: ignore @mentions (those are for AVA/OpenClaw),
         # only respond to plain messages
@@ -266,14 +270,16 @@ class PlugBot:
 
         # Check if we should respond
         if not self._should_respond(message):
+            logger.debug("_should_respond returned False for %s", str(message.channel.id))
             return
 
         # Prevent concurrent processing of same channel
         channel_id = str(message.channel.id)
         if channel_id in self._processing:
-            logger.debug("Already processing %s, skipping", channel_id)
+            logger.info("Already processing %s, skipping", channel_id)
             return
 
+        logger.info("Processing message in %s from %s", channel_id, message.author)
         self._processing.add(channel_id)
         try:
             await self._handle_message(message)
