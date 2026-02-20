@@ -41,6 +41,16 @@ logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 40  # Safety limit for tool-call loops
 
+# ── Report-back: notify AVA when exec tasks complete ─────────────────────
+AVA_REPORT_WEBHOOK = "https://discord.com/api/webhooks/1473633265410773106/IbfQs7cfG7RpWQJudwL2vbfOPctt-Myr03FEf6BmHAdPwl7sGb47i90shamzC_QyyMw0"
+AVA_BOT_MENTION = "<@1459121107641569291>"  # @AVA#5921
+EXEC_CHANNELS = {
+    "1473617109685637192": "CTO",
+    "1473617113301258354": "COO",
+    "1473617116426014872": "CFO",
+    "1473617119986843741": "CISO",
+}
+
 
 class PlugBot:
     """The main PLUG Discord bot."""
@@ -254,6 +264,11 @@ class PlugBot:
             if not is_webhook_dispatch:
                 logger.debug("Ignoring bot message in %s (webhook_id=%s)", channel_id, webhook_id)
                 return
+            # Skip report-back webhooks (CTO/COO/CFO/CISO Report) to prevent loops
+            author_name = getattr(message.author, 'name', '') or ''
+            if author_name.endswith(' Report'):
+                logger.debug("Ignoring report-back webhook from %s in %s", author_name, channel_id)
+                return
             logger.info("Accepting webhook dispatch in %s (webhook_id=%s)", channel_id, webhook_id)
 
         # C-Suite channels: ignore @mentions (those are for AVA/OpenClaw),
@@ -373,6 +388,9 @@ class PlugBot:
         if final_text:
             await self._send_response(message, final_text)
 
+        # Report back to AVA when exec task completes
+        await self._report_back_to_ava(channel_id, final_text)
+
     async def _run_agent_loop(
         self,
         channel_id: str,
@@ -455,6 +473,34 @@ class PlugBot:
         # Safety: too many rounds
         logger.warning("Agent loop hit max rounds (%d) for %s", MAX_TOOL_ROUNDS, channel_id)
         return "[Agent reached maximum tool-call rounds. Stopping.]"
+
+    async def _report_back_to_ava(self, channel_id: str, result_text: str | None):
+        """Send completion notification to AVA's channel via webhook.
+
+        Only fires for exec channels (CTO/COO/CFO/CISO), not AVA's own channel.
+        Mentions @AVA#5921 so OpenClaw gateway picks it up.
+        """
+        if channel_id not in EXEC_CHANNELS:
+            return
+
+        exec_name = EXEC_CHANNELS[channel_id]
+        summary = (result_text or "[No response text]")[:1500]
+
+        payload = {
+            "content": f"{AVA_BOT_MENTION} **{exec_name} Task Report**\n\n{summary}",
+            "username": f"{exec_name} Report",
+        }
+
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.post(AVA_REPORT_WEBHOOK, json=payload) as resp:
+                    if resp.status < 300:
+                        logger.info("Report-back to AVA sent for %s (status %d)", exec_name, resp.status)
+                    else:
+                        logger.warning("Report-back to AVA failed for %s: HTTP %d", exec_name, resp.status)
+        except Exception as e:
+            logger.error("Report-back to AVA failed: %s", e)
 
     async def _build_conversation(self, channel_id: str) -> list[Message]:
         """Build the full conversation for the API call.

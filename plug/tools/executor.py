@@ -160,15 +160,19 @@ class ToolExecutor:
 
     # ── write_file ───────────────────────────────────────────────────────
 
-    async def _write_file(self, path: str, content: str) -> str:
+    async def _write_file(self, path: str, content: str = "", text: str = "", data: str = "", **kwargs) -> str:
+        # Accept content from multiple possible field names
+        file_content = content or text or data
+        if not file_content:
+            return json.dumps({"error": "write_file requires 'content' parameter with the file contents. Call again with both 'path' and 'content'."})
         fpath = self._resolve_path(path)
 
         try:
             fpath.parent.mkdir(parents=True, exist_ok=True)
-            fpath.write_text(content, encoding="utf-8")
+            fpath.write_text(file_content, encoding="utf-8")
             return json.dumps({
                 "path": str(fpath),
-                "bytes_written": len(content.encode("utf-8")),
+                "bytes_written": len(file_content.encode("utf-8")),
                 "success": True,
             })
         except Exception as e:
