@@ -272,11 +272,11 @@ class PlugBot:
             logger.info("Accepting webhook dispatch in %s (webhook_id=%s)", channel_id, webhook_id)
 
         # C-Suite channels: ignore @mentions (those are for AVA/OpenClaw),
-        # only respond to plain messages
+        # only respond to plain messages. Skip this for personas that require mentions.
         if self.router and self.client.user:
             channel_id = str(message.channel.id)
             persona = self.router.route(channel_id)
-            if persona:
+            if persona and not persona.require_mention:
                 mentioned = any(
                     user.id == self.client.user.id
                     for user in message.mentions
@@ -339,13 +339,18 @@ class PlugBot:
 
         # If router is active, only respond in mapped channels
         channel_id = str(message.channel.id)
+        persona = None
         if self.router:
             persona = self.router.route(channel_id)
             if not persona:
                 return False  # Not a C-suite channel, ignore
 
-        # Check mention requirement
-        if self.config.discord.require_mention:
+        # Check mention requirement — persona-level overrides global config
+        need_mention = self.config.discord.require_mention
+        if persona and persona.require_mention is not None:
+            need_mention = persona.require_mention
+
+        if need_mention:
             if not self.client.user:
                 return False
             # Check if bot is mentioned
