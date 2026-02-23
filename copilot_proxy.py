@@ -237,6 +237,14 @@ class CopilotProxy:
                     headers=headers,
                 )
 
+                if resp.status_code >= 400:
+                    import sys
+                    model = body.get("model", "unknown")
+                    msg_count = len(body.get("messages", []))
+                    has_tools = bool(body.get("tools"))
+                    print(f"[PROXY:{self.port}] ERROR {resp.status_code} model={model} msgs={msg_count} tools={has_tools}", file=sys.stderr)
+                    print(f"[PROXY:{self.port}] Response: {resp.text[:500]}", file=sys.stderr)
+
                 return web.Response(
                     body=resp.content,
                     status=resp.status_code,
