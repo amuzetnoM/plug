@@ -17,6 +17,8 @@ import asyncio
 import json
 import logging
 import signal
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import discord
@@ -49,6 +51,15 @@ EXEC_CHANNELS = {
     "1473617113301258354": "COO",
     "1473617116426014872": "CFO",
     "1473617119986843741": "CISO",
+}
+
+# ── Report persistence: write exec reports to disk for AVA to read ────────
+REPORT_BASE_DIR = Path("/home/adam/workspace/enterprise/executives")
+EXEC_WORKSPACES = {
+    "CTO": REPORT_BASE_DIR / "cto",
+    "COO": REPORT_BASE_DIR / "coo",
+    "CFO": REPORT_BASE_DIR / "cfo",
+    "CISO": REPORT_BASE_DIR / "ciso",
 }
 
 
@@ -252,6 +263,9 @@ class PlugBot:
         if message.author == self.client.user:
             return
 
+        # Track whether this is a webhook dispatch (used to bypass mention checks)
+        is_webhook_dispatch = False
+
         # Ignore bots (except webhook dispatches in routed channels)
         if message.author.bot:
             webhook_id = getattr(message, 'webhook_id', None)
@@ -273,7 +287,7 @@ class PlugBot:
 
         # C-Suite channels: ignore @mentions (those are for AVA/OpenClaw),
         # only respond to plain messages. Skip this for personas that require mentions.
-        if self.router and self.client.user:
+        if self.router and self.client.user and not is_webhook_dispatch:
             channel_id = str(message.channel.id)
             persona = self.router.route(channel_id)
             if persona and not persona.require_mention:
@@ -284,8 +298,8 @@ class PlugBot:
                 if mentioned:
                     return  # @mention = talking to AVA, not C-suite
 
-        # Check if we should respond
-        if not self._should_respond(message):
+        # Check if we should respond (webhook dispatches bypass mention requirement)
+        if not self._should_respond(message, is_webhook=is_webhook_dispatch):
             logger.debug("_should_respond returned False for %s", str(message.channel.id))
             return
 
@@ -310,14 +324,14 @@ class PlugBot:
 
     # ── Message routing ──────────────────────────────────────────────────
 
-    def _should_respond(self, message: DiscordMessage) -> bool:
+    def _should_respond(self, message: DiscordMessage, *, is_webhook: bool = False) -> bool:
         """Determine if the bot should respond to this message."""
         is_dm = isinstance(message.channel, discord.DMChannel)
 
         if is_dm:
             return self._check_dm_policy(message)
         else:
-            return self._check_guild_policy(message)
+            return self._check_guild_policy(message, is_webhook=is_webhook)
 
     def _check_dm_policy(self, message: DiscordMessage) -> bool:
         """Check DM policy."""
@@ -329,8 +343,8 @@ class PlugBot:
         user_id = str(message.author.id)
         return user_id in self.config.discord.dm_allowlist
 
-    def _check_guild_policy(self, message: DiscordMessage) -> bool:
-        """Check guild/mention policy."""
+    def _check_guild_policy(self, message: DiscordMessage, *, is_webhook: bool = False) -> bool:
+        """Check guild/mention policy. Webhook dispatches bypass mention requirement."""
         # Check guild whitelist
         if self.config.discord.guild_ids:
             guild_id = str(message.guild.id) if message.guild else ""
@@ -344,6 +358,10 @@ class PlugBot:
             persona = self.router.route(channel_id)
             if not persona:
                 return False  # Not a C-suite channel, ignore
+
+        # Webhook dispatches always pass — they were already validated in on_message
+        if is_webhook:
+            return True
 
         # Check mention requirement — persona-level overrides global config
         need_mention = self.config.discord.require_mention
@@ -480,10 +498,11 @@ class PlugBot:
         return "[Agent reached maximum tool-call rounds. Stopping.]"
 
     async def _report_back_to_ava(self, channel_id: str, result_text: str | None):
-        """Send completion notification to AVA's channel via webhook.
+        """Send completion notification to AVA's channel via webhook AND persist to disk.
 
         Only fires for exec channels (CTO/COO/CFO/CISO), not AVA's own channel.
-        Mentions @AVA#5921 so OpenClaw gateway picks it up.
+        Mentions @AVA#5921 so OpenClaw/Mach6 gateway picks it up.
+        Also writes report to executives/{role}/reports/ for AVA to read directly.
         """
         if channel_id not in EXEC_CHANNELS:
             return
@@ -491,6 +510,10 @@ class PlugBot:
         exec_name = EXEC_CHANNELS[channel_id]
         summary = (result_text or "[No response text]")[:1500]
 
+        # 1) Persist report to disk (AVA can always read these)
+        await self._persist_report(exec_name, result_text)
+
+        # 2) Send webhook notification to AVA's Discord channel
         payload = {
             "content": f"{AVA_BOT_MENTION} **{exec_name} Task Report**\n\n{summary}",
             "username": f"{exec_name} Report",
@@ -506,6 +529,54 @@ class PlugBot:
                         logger.warning("Report-back to AVA failed for %s: HTTP %d", exec_name, resp.status)
         except Exception as e:
             logger.error("Report-back to AVA failed: %s", e)
+
+    async def _persist_report(self, exec_name: str, result_text: str | None):
+        """Write exec report to disk so AVA can read it without Discord channel access.
+
+        Files:
+          executives/{role}/reports/latest.md  — always the most recent report (overwritten)
+          executives/{role}/reports/{timestamp}.md — timestamped archive
+          executives/reports-feed.jsonl — append-only feed of all exec reports
+        """
+        try:
+            now = datetime.now(timezone.utc)
+            timestamp = now.strftime("%Y-%m-%dT%H-%M-%SZ")
+            date_str = now.strftime("%Y-%m-%d %H:%M:%S UTC")
+            content = result_text or "[No response text]"
+
+            workspace = EXEC_WORKSPACES.get(exec_name)
+            if not workspace:
+                logger.warning("No workspace configured for %s", exec_name)
+                return
+
+            # Ensure reports directory exists
+            reports_dir = workspace / "reports"
+            reports_dir.mkdir(parents=True, exist_ok=True)
+
+            report_md = f"# {exec_name} Report\n**Timestamp:** {date_str}\n\n---\n\n{content}\n"
+
+            # Write latest (always overwritten — quick access)
+            latest_path = reports_dir / "latest.md"
+            latest_path.write_text(report_md, encoding="utf-8")
+
+            # Write timestamped archive
+            archive_path = reports_dir / f"{timestamp}.md"
+            archive_path.write_text(report_md, encoding="utf-8")
+
+            # Append to unified feed (all execs, JSONL)
+            feed_path = REPORT_BASE_DIR / "reports-feed.jsonl"
+            feed_entry = json.dumps({
+                "timestamp": now.isoformat(),
+                "exec": exec_name,
+                "content": content[:3000],  # cap for feed
+            })
+            with open(feed_path, "a", encoding="utf-8") as f:
+                f.write(feed_entry + "\n")
+
+            logger.info("Report persisted for %s: %s + latest.md + feed", exec_name, archive_path.name)
+
+        except Exception as e:
+            logger.error("Failed to persist report for %s: %s", exec_name, e)
 
     async def _build_conversation(self, channel_id: str) -> list[Message]:
         """Build the full conversation for the API call.

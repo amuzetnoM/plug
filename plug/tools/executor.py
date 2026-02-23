@@ -25,8 +25,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE = str(Path.home() / "workspace")
-MEMORY_VENV = ".venv/bin/activate"
-MEMORY_SCRIPT = "memory_search.py"
+MEMORY_VENV = ".hektor-env/bin/activate"
+MEMORY_SCRIPT = ".ava-memory/ava_memory_fast.py"
 
 
 class ToolExecutor:
@@ -86,7 +86,7 @@ class ToolExecutor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
-                env={**os.environ, "TERM": "dumb", "NO_COLOR": "1"},
+                env={**os.environ, "TERM": "dumb", "NO_COLOR": "1", "PLUG_CALLER": "1"},
             )
 
             try:
