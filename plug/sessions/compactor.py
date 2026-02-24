@@ -72,6 +72,39 @@ Messages to summarize:
 Write the summary:"""
 
 
+def _safe_split_point(messages: list[Message], split: int) -> int:
+    """Adjust split point to never orphan tool_call/tool_result pairs.
+
+    The kept (active) messages are messages[split:]. The compacted are messages[:split].
+    An orphan occurs when:
+    - A tool result is in kept but its assistant tool_call is in compacted
+    - An assistant with tool_calls is in compacted but some tool results are in kept
+
+    Fix: walk split backward until messages[split] is NOT a tool result.
+    This ensures any tool results stay together with their assistant.
+    """
+    n = len(messages)
+    if split <= 0 or split >= n:
+        return split
+
+    # Walk backward past any tool results at the boundary
+    while split > 0 and messages[split].role == "tool":
+        split -= 1
+
+    # Now messages[split] should be an assistant (with tool_calls) or user/system.
+    # If it's an assistant with tool_calls, its tool results are at split+1, split+2...
+    # and they'll all be in the kept set. The assistant itself is also in kept. ✓
+    # But we need the assistant itself to be KEPT (not compacted), so split should
+    # point AT the assistant, not after it.
+    # Since messages[:split] is compacted and messages[split:] is kept,
+    # messages[split] IS in the kept set. ✓
+
+    if split <= 0:
+        return 0
+
+    return split
+
+
 class Compactor:
     """Token-aware conversation compactor.
 

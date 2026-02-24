@@ -41,7 +41,7 @@ from plug.router import AgentRouter, AgentPersona
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 40  # Safety limit for tool-call loops
+MAX_TOOL_ROUNDS = 15  # Safety limit for tool-call loops
 
 # ── Report-back: notify AVA when exec tasks complete ─────────────────────
 AVA_REPORT_WEBHOOK = "https://discord.com/api/webhooks/1473633265410773106/IbfQs7cfG7RpWQJudwL2vbfOPctt-Myr03FEf6BmHAdPwl7sGb47i90shamzC_QyyMw0"
@@ -141,8 +141,8 @@ class PlugBot:
         self.chain = ProviderChain(
             self.provider, all_models,
             fallback_providers=fallback_providers,
-            max_retries=2,
-            retry_delay=1.0,
+            max_retries=3,
+            retry_delay=2.0,
         )
 
         # Tool executor
@@ -312,7 +312,7 @@ class PlugBot:
         logger.info("Processing message in %s from %s", channel_id, message.author)
         self._processing.add(channel_id)
         try:
-            await self._handle_message(message)
+            await self._handle_message(message, is_dispatch=is_webhook_dispatch)
         except Exception as e:
             logger.error("Error handling message in %s: %s", channel_id, e, exc_info=True)
             try:
@@ -404,7 +404,7 @@ class PlugBot:
 
     # ── Agent loop ───────────────────────────────────────────────────────
 
-    async def _handle_message(self, message: DiscordMessage) -> None:
+    async def _handle_message(self, message: DiscordMessage, *, is_dispatch: bool = False) -> None:
         """Main agent loop: process a message through the LLM."""
         channel_id = str(message.channel.id)
 
@@ -412,6 +412,13 @@ class PlugBot:
         user_text = self._extract_text(message)
         if not user_text.strip():
             return
+
+        # Fresh session for dispatches: clear old messages so each task
+        # starts with a clean conversation (prevents context bloat + 400 errors)
+        if is_dispatch:
+            cleared = await self.store.clear_messages(channel_id)
+            if cleared:
+                logger.info("Cleared %d old messages for dispatch in %s", cleared, channel_id)
 
         # Store the user message
         user_msg = Message(role="user", content=user_text)
@@ -451,6 +458,10 @@ class PlugBot:
         5. When LLM returns text (no tool_calls), return it
         """
         for round_num in range(MAX_TOOL_ROUNDS):
+            # Throttle between rounds to avoid rate-limiting (especially with parallel execs)
+            if round_num > 0:
+                await asyncio.sleep(0.5)
+
             # Show typing indicator
             async with discord_message.channel.typing():
                 try:
@@ -603,6 +614,7 @@ class PlugBot:
         """Build the full conversation for the API call.
 
         Prepends system prompt (from router persona if available), then all active messages.
+        Ensures no orphaned tool results (tool message without matching assistant tool_call).
         """
         messages: list[Message] = []
 
@@ -620,6 +632,11 @@ class PlugBot:
 
         # Session history
         history = await self.store.get_messages(channel_id)
+
+        # Integrity pass: strip orphaned tool results and ensure
+        # every tool result has a matching assistant tool_call above it
+        history = _sanitize_tool_pairs(history)
+
         messages.extend(history)
 
         return messages
@@ -795,3 +812,36 @@ def _truncate_args(args: dict[str, Any], max_len: int = 200) -> str:
     if len(s) > max_len:
         return s[:max_len] + "..."
     return s
+
+
+def _sanitize_tool_pairs(messages: list[Message]) -> list[Message]:
+    """Remove orphaned tool results that have no matching assistant tool_call.
+
+    This prevents 400 errors from the API when compaction or session corruption
+    leaves tool results without their parent assistant message.
+    """
+    # Collect all tool_call IDs from assistant messages
+    known_tool_call_ids: set[str] = set()
+    for msg in messages:
+        if msg.role == "assistant" and msg.tool_calls:
+            for tc in msg.tool_calls:
+                known_tool_call_ids.add(tc.id)
+
+    # Filter: keep tool messages only if their tool_call_id is known
+    sanitized = []
+    dropped = 0
+    for msg in messages:
+        if msg.role == "tool" and msg.tool_call_id:
+            if msg.tool_call_id not in known_tool_call_ids:
+                dropped += 1
+                continue
+        # Also strip leading tool messages (before any assistant)
+        if msg.role == "tool" and not any(m.role == "assistant" for m in sanitized):
+            dropped += 1
+            continue
+        sanitized.append(msg)
+
+    if dropped:
+        logger.warning("Sanitized %d orphaned tool result(s) from conversation", dropped)
+
+    return sanitized

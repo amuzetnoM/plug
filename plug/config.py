@@ -62,7 +62,7 @@ class AgentConfig(BaseModel):
 
 
 class OllamaConfig(BaseModel):
-    enabled: bool = True
+    enabled: bool = False  # Disabled by default — 7B models can't handle C-suite tasks
     base_url: str = "http://localhost:11434"
     models: list[str] = Field(default_factory=lambda: ["qwen2.5-coder:7b"])
     timeout: float = 120.0

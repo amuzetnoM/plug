@@ -187,7 +187,11 @@ class ProviderChain:
         temperature: float = 0.7,
         max_tokens: int = 4096,
     ) -> ChatResponse:
-        """Try primary provider models with retry, then fallback providers."""
+        """Try primary provider models with retry, then fallback providers.
+
+        Rate-limit aware: detects 429 responses and uses exponential backoff
+        with longer delays before trying the next model.
+        """
         import asyncio
 
         last_error: Exception | None = None
@@ -195,7 +199,7 @@ class ProviderChain:
         # If a specific model is requested, try it first
         models_to_try = [model] + self.models if model else self.models
 
-        # Try primary provider (with retry)
+        # Try primary provider (with retry + rate limit backoff)
         for i in range(len(models_to_try)):
             m = models_to_try[i]
 
@@ -208,37 +212,65 @@ class ProviderChain:
                     return response
                 except Exception as e:
                     last_error = e
+                    is_rate_limit = _is_rate_limit_error(e)
+
                     if attempt < self.max_retries - 1:
-                        delay = self.retry_delay * (attempt + 1)
-                        logger.warning(
-                            "Model %s attempt %d failed: %s — retrying in %.1fs",
-                            model, attempt + 1, e, delay,
-                        )
+                        # Exponential backoff: longer for rate limits
+                        if is_rate_limit:
+                            delay = min(self.retry_delay * (2 ** (attempt + 2)), 30.0)
+                            logger.warning(
+                                "Model %s rate-limited (attempt %d) — backoff %.1fs",
+                                m, attempt + 1, delay,
+                            )
+                        else:
+                            delay = self.retry_delay * (attempt + 1)
+                            logger.warning(
+                                "Model %s attempt %d failed: %s — retrying in %.1fs",
+                                m, attempt + 1, e, delay,
+                            )
                         await asyncio.sleep(delay)
                     else:
-                        logger.warning("Model %s failed after %d attempts: %s", model, self.max_retries, e)
+                        logger.warning(
+                            "Model %s failed after %d attempts: %s",
+                            m, self.max_retries, e,
+                        )
+                        # If rate-limited on primary, wait before trying fallbacks
+                        if is_rate_limit:
+                            logger.info("Rate limit detected — waiting 5s before fallback")
+                            await asyncio.sleep(5.0)
 
         # Try fallback providers
         for fb_provider, fb_models in self.fallback_providers:
-            for model in fb_models:
+            for fb_model in fb_models:
                 for attempt in range(self.max_retries):
                     try:
                         response = await fb_provider.chat(
-                            messages, model=model, tools=tools,
+                            messages, model=fb_model, tools=tools,
                             temperature=temperature, max_tokens=max_tokens,
                         )
-                        logger.info("Fallback succeeded: %s on %s", model, type(fb_provider).__name__)
+                        logger.info("Fallback succeeded: %s on %s", fb_model, type(fb_provider).__name__)
                         return response
                     except Exception as e:
                         last_error = e
                         if attempt < self.max_retries - 1:
                             await asyncio.sleep(self.retry_delay * (attempt + 1))
                         else:
-                            logger.warning("Fallback model %s failed: %s", model, e)
+                            logger.warning("Fallback model %s failed: %s", fb_model, e)
 
         raise RuntimeError(
             f"All providers and models failed. Last error: {last_error}"
         ) from last_error
+
+
+def _is_rate_limit_error(e: Exception) -> bool:
+    """Detect rate limit errors from HTTP status or message."""
+    err_str = str(e).lower()
+    if "429" in err_str or "rate" in err_str or "too many" in err_str:
+        return True
+    # httpx.HTTPStatusError carries response
+    if hasattr(e, "response") and hasattr(e.response, "status_code"):
+        return e.response.status_code == 429
+    return False
 
     async def chat_stream(
         self,

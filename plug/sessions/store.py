@@ -124,6 +124,19 @@ class SessionStore:
         await self.db.commit()
         return cursor.rowcount > 0
 
+    async def clear_messages(self, channel_id: str) -> int:
+        """Delete all messages for a channel without deleting the session.
+
+        Useful for starting a fresh conversation in the same channel.
+        Returns the number of messages deleted.
+        """
+        cursor = await self.db.execute(
+            "DELETE FROM messages WHERE channel_id = ?",
+            (channel_id,),
+        )
+        await self.db.commit()
+        return cursor.rowcount
+
     async def clear_all(self) -> int:
         """Delete all sessions. Returns count deleted."""
         cursor = await self.db.execute("DELETE FROM sessions")
