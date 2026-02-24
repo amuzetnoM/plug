@@ -94,6 +94,12 @@ class ProxyChatProvider(ChatProvider):
         logger.debug("Chat request to %s (tools=%d)", used_model, len(tools or []))
 
         resp = await self._client.post("/chat/completions", json=body)
+        if resp.status_code >= 400:
+            body_text = resp.text[:500] if resp.text else "(empty)"
+            logger.error(
+                "API error %d for model %s: %s",
+                resp.status_code, used_model, body_text,
+            )
         resp.raise_for_status()
         data = resp.json()
 

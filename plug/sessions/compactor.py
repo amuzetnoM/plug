@@ -134,6 +134,13 @@ class Compactor:
         if keep_from <= 0:
             return False
 
+        # INTEGRITY: Never split tool_call/tool_result pairs.
+        # If keep_from lands on a tool result, walk backward to include
+        # the assistant message that issued the tool_call.
+        # If keep_from lands right after an assistant with tool_calls,
+        # walk forward to include all its tool results.
+        keep_from = _safe_split_point(messages, keep_from)
+
         # Messages to summarize
         to_compact = messages[:keep_from]
 
