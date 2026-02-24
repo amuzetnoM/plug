@@ -32,6 +32,7 @@ class AgentPersona:
     temperature: float = 0.5
     max_tokens: int = 4096
     require_mention: Optional[bool] = None  # None = use global config default
+    authorized_users: Optional[list[str]] = None  # None = use global config; [] = webhooks only; ["id"] = only these users + webhooks
 
     @property
     def system_prompt(self) -> str:

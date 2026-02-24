@@ -357,11 +357,32 @@ class PlugBot:
         if self.router:
             persona = self.router.route(channel_id)
             if not persona:
-                return False  # Not a C-suite channel, ignore
+                return False  # Not a routed channel, ignore
 
         # Webhook dispatches always pass — they were already validated in on_message
         if is_webhook:
             return True
+
+        # ── Authorized users gate ────────────────────────────────────────
+        # Per-persona authorized_users takes priority over global config.
+        # None = fall back to global; [] = webhooks only (no humans); ["id",...] = only these users
+        auth_users = None
+        if persona and persona.authorized_users is not None:
+            auth_users = persona.authorized_users
+        elif self.config.discord.authorized_users:
+            auth_users = self.config.discord.authorized_users
+
+        if auth_users is not None:
+            sender_id = str(message.author.id)
+            if not auth_users:
+                # Empty list = webhooks only, no human messages
+                logger.info("Channel %s is webhook-only — rejecting human %s (%s)",
+                            channel_id, message.author, sender_id)
+                return False
+            if sender_id not in auth_users:
+                logger.info("Unauthorized sender %s (%s) in channel %s — ignoring",
+                            message.author, sender_id, channel_id)
+                return False
 
         # Check mention requirement — persona-level overrides global config
         need_mention = self.config.discord.require_mention

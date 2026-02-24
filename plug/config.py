@@ -45,6 +45,7 @@ class DiscordConfig(BaseModel):
     require_mention: bool = True
     dm_policy: str = "allowlist"
     dm_allowlist: list[str] = Field(default_factory=lambda: ["193011943382974466"])
+    authorized_users: list[str] = Field(default_factory=list)  # If non-empty, only these user IDs can trigger agent in guild channels
     status_message: str = "\U0001f52e PLUG Online"
     max_message_length: int = 2000
     reconnect_delay: float = 5.0
