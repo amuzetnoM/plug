@@ -224,4 +224,41 @@ TOOL_DEFINITIONS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "discord_send",
+            "description": (
+                "Send a message to a Discord channel. Can include text, "
+                "file attachments (images, documents, etc.), or both. "
+                "Use this to post messages, share images, send files, "
+                "or communicate in any Discord channel you have access to."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {
+                        "type": "string",
+                        "description": "The Discord channel ID to send to.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Text message content. Optional if sending a file.",
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": (
+                            "Path to a file to attach (image, document, etc.). "
+                            "Absolute or workspace-relative. Optional."
+                        ),
+                    },
+                    "reply_to": {
+                        "type": "string",
+                        "description": "Message ID to reply to. Optional.",
+                    },
+                },
+                "required": ["channel_id"],
+            },
+        },
+    },
 ]

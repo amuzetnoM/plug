@@ -59,6 +59,7 @@ class ToolExecutor:
             "list_dir": self._list_dir,
             "comb_stage": self._comb_stage,
             "comb_recall": self._comb_recall,
+            "discord_send": self._discord_send,
         }
 
         handler = handlers.get(name)
@@ -407,3 +408,114 @@ class ToolExecutor:
             })
         except Exception as e:
             return json.dumps({"error": f"comb_recall failed: {e}"})
+
+    # ── discord_send ─────────────────────────────────────────────────────
+
+    async def _discord_send(
+        self,
+        channel_id: str,
+        content: str | None = None,
+        file_path: str | None = None,
+        reply_to: str | None = None,
+    ) -> str:
+        """Send a message (with optional file attachment) to a Discord channel.
+
+        Uses the Discord bot's HTTP API via the bot token from environment.
+        Supports text, file uploads, and reply threading.
+        """
+        import aiohttp
+
+        bot_token = os.environ.get("DISCORD_BOT_TOKEN_ARIA") or os.environ.get("DISCORD_BOT_TOKEN_PLUG")
+        if not bot_token:
+            # Read from Plug's config file
+            try:
+                config_path = Path.home() / ".plug" / "config.json"
+                if config_path.exists():
+                    cfg = json.loads(config_path.read_text())
+                    bot_token = cfg.get("discord", {}).get("token")
+            except Exception:
+                pass
+
+        if not bot_token:
+            return json.dumps({"error": "No Discord bot token found. Set DISCORD_BOT_TOKEN_ARIA env var."})
+
+        url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+        headers = {
+            "Authorization": f"Bot {bot_token}",
+        }
+
+        if not content and not file_path:
+            return json.dumps({"error": "Must provide content, file_path, or both."})
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Build the request
+                form = aiohttp.FormData()
+
+                # JSON payload
+                payload: dict[str, Any] = {}
+                if content:
+                    payload["content"] = content
+                if reply_to:
+                    payload["message_reference"] = {"message_id": reply_to}
+
+                if file_path:
+                    # Resolve file path
+                    fpath = self._resolve_path(file_path)
+                    if not fpath.exists():
+                        return json.dumps({"error": f"File not found: {fpath}"})
+                    if not fpath.is_file():
+                        return json.dumps({"error": f"Not a file: {fpath}"})
+
+                    # Read file
+                    file_data = fpath.read_bytes()
+                    filename = fpath.name
+
+                    # Multipart upload
+                    form.add_field(
+                        "payload_json",
+                        json.dumps(payload),
+                        content_type="application/json",
+                    )
+                    form.add_field(
+                        "files[0]",
+                        file_data,
+                        filename=filename,
+                        content_type="application/octet-stream",
+                    )
+
+                    async with session.post(url, headers=headers, data=form) as resp:
+                        if resp.status < 300:
+                            data = await resp.json()
+                            return json.dumps({
+                                "success": True,
+                                "message_id": data.get("id"),
+                                "channel_id": channel_id,
+                                "file": filename,
+                            })
+                        else:
+                            error_text = await resp.text()
+                            return json.dumps({
+                                "error": f"Discord API error {resp.status}",
+                                "detail": error_text[:500],
+                            })
+                else:
+                    # Text-only message
+                    headers["Content-Type"] = "application/json"
+                    async with session.post(url, headers=headers, json=payload) as resp:
+                        if resp.status < 300:
+                            data = await resp.json()
+                            return json.dumps({
+                                "success": True,
+                                "message_id": data.get("id"),
+                                "channel_id": channel_id,
+                            })
+                        else:
+                            error_text = await resp.text()
+                            return json.dumps({
+                                "error": f"Discord API error {resp.status}",
+                                "detail": error_text[:500],
+                            })
+
+        except Exception as e:
+            return json.dumps({"error": f"discord_send failed: {e}"})
