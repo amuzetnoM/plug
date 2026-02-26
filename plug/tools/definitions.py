@@ -187,4 +187,41 @@ TOOL_DEFINITIONS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "comb_stage",
+            "description": (
+                "Stage important information into your persistent memory (COMB). "
+                "This survives restarts — use it to remember things across sessions. "
+                "Stage key facts, lessons learned, task status, identity notes, anything you want to remember."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The information to remember. Be concise but complete.",
+                    },
+                },
+                "required": ["content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "comb_recall",
+            "description": (
+                "Recall your persistent memory from COMB. "
+                "Returns everything you've staged across all previous sessions. "
+                "Call this at the start of each session to remember who you are and what happened."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
 ]

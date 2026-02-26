@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import shlex
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,8 @@ class ToolExecutor:
             "web_fetch": self._web_fetch,
             "memory_search": self._memory_search,
             "list_dir": self._list_dir,
+            "comb_stage": self._comb_stage,
+            "comb_recall": self._comb_recall,
         }
 
         handler = handlers.get(name)
@@ -336,3 +339,71 @@ class ToolExecutor:
             })
         except Exception as e:
             return json.dumps({"error": f"list_dir failed: {e}"})
+
+    # ── comb_stage ───────────────────────────────────────────────────────
+
+    async def _comb_stage(self, content: str) -> str:
+        """Stage information into Aria's persistent COMB memory."""
+        try:
+            from comb import CombStore
+
+            store_path = Path.home() / "plug" / "aria_memory" / "comb-store"
+            store = CombStore(str(store_path))
+            store.stage(content, metadata={
+                "source": "aria-tool",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            # Rollup so it's searchable and survives restarts
+            store.rollup()
+            return json.dumps({
+                "success": True,
+                "chars_staged": len(content),
+                "message": "✅ Staged and rolled up into persistent memory.",
+            })
+        except Exception as e:
+            return json.dumps({"error": f"comb_stage failed: {e}"})
+
+    # ── comb_recall ──────────────────────────────────────────────────────
+
+    async def _comb_recall(self) -> str:
+        """Recall Aria's persistent memory from COMB."""
+        try:
+            from comb import CombStore
+
+            store_path = Path.home() / "plug" / "aria_memory" / "comb-store"
+            store = CombStore(str(store_path))
+            
+            queries = [
+                "identity sister AVA who I am",
+                "active tasks projects status",
+                "lessons learned mistakes",
+                "important context remember",
+            ]
+
+            seen = set()
+            all_results = []
+
+            for query in queries:
+                results = store.search(query, mode="bm25", k=3)
+                for doc in results:
+                    if doc.date not in seen:
+                        seen.add(doc.date)
+                        all_results.append(doc)
+
+            if not all_results:
+                return json.dumps({
+                    "memory": "COMB is empty — no memories yet. Use comb_stage to start building your memory.",
+                })
+
+            all_results.sort(key=lambda d: d.date, reverse=True)
+
+            memories = []
+            for doc in all_results[:10]:
+                memories.append(f"--- {doc.date} ---\n{doc.to_dict()['content'][:1000]}")
+
+            return json.dumps({
+                "memory": "\n\n".join(memories),
+                "entries": len(memories),
+            })
+        except Exception as e:
+            return json.dumps({"error": f"comb_recall failed: {e}"})

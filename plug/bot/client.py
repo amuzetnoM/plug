@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import signal
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,11 @@ MAX_TOOL_ROUNDS = 15  # Safety limit for tool-call loops
 # ── Report-back: notify AVA when exec tasks complete ─────────────────────
 AVA_REPORT_WEBHOOK = "https://discord.com/api/webhooks/1473633265410773106/IbfQs7cfG7RpWQJudwL2vbfOPctt-Myr03FEf6BmHAdPwl7sGb47i90shamzC_QyyMw0"
 AVA_BOT_MENTION = "<@1459121107641569291>"  # @AVA#5921
+# ── Sister coordination ──────────────────────────────────────────────────
+# Sister bot IDs are loaded from config at runtime (self.config.discord.sister_bot_ids).
+# No hardcoded IDs — config-driven, just like Mach6.
+SISTER_COOLDOWN_SECONDS = 10  # Match Mach6's 10s cooldown
+
 EXEC_CHANNELS = {
     "1473617109685637192": "CTO",
     "1473617113301258354": "COO",
@@ -93,6 +99,7 @@ class PlugBot:
 
         # State
         self._processing: set[str] = set()  # channel IDs currently being processed
+        self._sister_cooldown: dict[str, float] = {}  # channel_id → last response timestamp
 
         # Wire up events
         self.client.event(self.on_ready)
@@ -236,7 +243,7 @@ class PlugBot:
 
     async def on_ready(self) -> None:
         """Called when the bot connects to Discord."""
-        logger.info("PLUG connected as %s (ID: %s)", self.client.user, self.client.user.id)
+        logger.info("Aria connected as %s (ID: %s)", self.client.user, self.client.user.id)
 
         # Set status
         status_text = self.config.discord.status_message
@@ -266,16 +273,27 @@ class PlugBot:
         # Track whether this is a webhook dispatch (used to bypass mention checks)
         is_webhook_dispatch = False
 
-        # Ignore bots (except webhook dispatches in routed channels)
+        # Ignore bots (except webhook dispatches in routed channels,
+        # or whitelisted sister bots in shared channels)
+        sister_bot_ids = set(self.config.discord.sister_bot_ids)  # Config-driven, not hardcoded
         if message.author.bot:
             webhook_id = getattr(message, 'webhook_id', None)
             channel_id = str(message.channel.id)
+            is_sister_bot = str(message.author.id) in sister_bot_ids
             is_webhook_dispatch = (
                 webhook_id is not None
                 and self.router
                 and self.router.route(channel_id) is not None
             )
-            if not is_webhook_dispatch:
+            if is_sister_bot:
+                # Sister cooldown — prevent echo loops (matches Mach6's 10s cooldown)
+                last_response = self._sister_cooldown.get(channel_id, 0)
+                if time.time() - last_response < SISTER_COOLDOWN_SECONDS:
+                    logger.info("Sister cooldown active for %s (%ds), skipping",
+                                channel_id, SISTER_COOLDOWN_SECONDS)
+                    return
+                logger.info("Accepting sister bot message from %s in %s", message.author, channel_id)
+            elif not is_webhook_dispatch:
                 logger.debug("Ignoring bot message in %s (webhook_id=%s)", channel_id, webhook_id)
                 return
             # Skip report-back webhooks (CTO/COO/CFO/CISO Report) to prevent loops
@@ -315,10 +333,15 @@ class PlugBot:
             await self._handle_message(message, is_dispatch=is_webhook_dispatch)
         except Exception as e:
             logger.error("Error handling message in %s: %s", channel_id, e, exc_info=True)
-            try:
-                await message.reply(f"Something went wrong: {type(e).__name__}", mention_author=False)
-            except Exception:
-                pass
+            # Suppress error messages for sister conversations (prevents error loops)
+            is_sister_convo = str(message.author.id) in set(self.config.discord.sister_bot_ids)
+            if not is_sister_convo:
+                try:
+                    await message.reply(f"Something went wrong: {type(e).__name__}", mention_author=False)
+                except Exception:
+                    pass
+            else:
+                logger.info("Suppressed error message for sister conversation in %s", channel_id)
         finally:
             self._processing.discard(channel_id)
 
@@ -392,6 +415,24 @@ class PlugBot:
         if need_mention:
             if not self.client.user:
                 return False
+            # Strict mention channels: even sisters and owners must @mention
+            strict_channels = getattr(self.config.discord, 'strict_mention_channels', []) or []
+            is_strict = channel_id in strict_channels
+
+            # Sister bots bypass mention requirement (except in strict channels)
+            is_sister = str(message.author.id) in set(self.config.discord.sister_bot_ids)
+            if is_sister and not is_strict:
+                return True
+
+            # Sibling yield: if message @mentions a sister but NOT us, stand down
+            # This ensures @AVA → only Mach6, @Aria → only Aria
+            sister_ids = set(self.config.discord.sister_bot_ids)
+            if sister_ids and message.mentions:
+                mentions_me = any(u.id == self.client.user.id for u in message.mentions)
+                mentions_sister = any(str(u.id) in sister_ids for u in message.mentions)
+                if mentions_sister and not mentions_me:
+                    return False  # They're talking to sister, not us
+
             # Check if bot is mentioned
             mentioned = any(
                 user.id == self.client.user.id
@@ -420,7 +461,14 @@ class PlugBot:
             if cleared:
                 logger.info("Cleared %d old messages for dispatch in %s", cleared, channel_id)
 
-        # Store the user message
+        # Store the user message — inject sister context if from a sibling bot
+        is_sister = str(message.author.id) in set(self.config.discord.sister_bot_ids)
+        if is_sister:
+            user_text = (
+                f"[From your sister (AVA)]\n"
+                f"(You have CHOICE — reply genuinely or reply with exactly NO_REPLY to stay silent.)\n\n"
+                f"{user_text}"
+            )
         user_msg = Message(role="user", content=user_text)
         user_tokens = count_message_tokens(user_msg)
         await self.store.add_message(channel_id, user_msg, token_count=user_tokens)
@@ -435,9 +483,14 @@ class PlugBot:
         # Agent loop: call LLM, execute tools, repeat until text response
         final_text = await self._run_agent_loop(channel_id, conversation, message)
 
-        # Send the response
-        if final_text:
+        # Send the response — honor choice: NO_REPLY means the agent chose silence
+        if final_text and final_text.strip() not in ('NO_REPLY', 'HEARTBEAT_OK'):
             await self._send_response(message, final_text)
+            # Record sister cooldown if we just responded to a sister
+            if is_sister:
+                self._sister_cooldown[channel_id] = time.time()
+        elif final_text and final_text.strip() == 'NO_REPLY':
+            logger.info("Agent chose NO_REPLY for %s — honoring silence", channel_id)
 
         # Report back to AVA when exec task completes
         await self._report_back_to_ava(channel_id, final_text)
