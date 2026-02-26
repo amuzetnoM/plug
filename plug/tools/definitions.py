@@ -261,4 +261,37 @@ TOOL_DEFINITIONS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "discord_react",
+            "description": (
+                "Add an emoji reaction to a Discord message. "
+                "Use this to acknowledge messages without sending a reply — "
+                "great for avoiding echo loops. "
+                "Examples: 👍 ❤️ 😂 🔮 ⚡ ✅ 👀 🙌 💡 🤔"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {
+                        "type": "string",
+                        "description": "The Discord channel ID containing the message.",
+                    },
+                    "message_id": {
+                        "type": "string",
+                        "description": "The ID of the message to react to.",
+                    },
+                    "emoji": {
+                        "type": "string",
+                        "description": (
+                            "The emoji to react with. Use Unicode emoji (👍 ❤️ etc.) "
+                            "or custom emoji in the format name:id."
+                        ),
+                    },
+                },
+                "required": ["channel_id", "message_id", "emoji"],
+            },
+        },
+    },
 ]

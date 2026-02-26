@@ -60,6 +60,7 @@ class ToolExecutor:
             "comb_stage": self._comb_stage,
             "comb_recall": self._comb_recall,
             "discord_send": self._discord_send,
+            "discord_react": self._discord_react,
         }
 
         handler = handlers.get(name)
@@ -519,3 +520,63 @@ class ToolExecutor:
 
         except Exception as e:
             return json.dumps({"error": f"discord_send failed: {e}"})
+
+    # ── discord_react ────────────────────────────────────────────────────
+
+    async def _discord_react(
+        self,
+        channel_id: str,
+        message_id: str,
+        emoji: str,
+    ) -> str:
+        """Add an emoji reaction to a Discord message.
+
+        Uses the Discord REST API: PUT /channels/{id}/messages/{id}/reactions/{emoji}/@me
+        Unicode emojis are URL-encoded automatically. Custom emoji uses name:id format.
+        """
+        import aiohttp
+        from urllib.parse import quote as url_quote
+
+        bot_token = os.environ.get("DISCORD_BOT_TOKEN_ARIA") or os.environ.get("DISCORD_BOT_TOKEN_PLUG")
+        if not bot_token:
+            try:
+                config_path = Path.home() / ".plug" / "config.json"
+                if config_path.exists():
+                    cfg = json.loads(config_path.read_text())
+                    bot_token = cfg.get("discord", {}).get("token")
+            except Exception:
+                pass
+
+        if not bot_token:
+            return json.dumps({"error": "No Discord bot token found."})
+
+        # URL-encode the emoji for the API path
+        encoded_emoji = url_quote(emoji, safe=":")
+
+        url = (
+            f"https://discord.com/api/v10/channels/{channel_id}"
+            f"/messages/{message_id}/reactions/{encoded_emoji}/@me"
+        )
+        headers = {
+            "Authorization": f"Bot {bot_token}",
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.put(url, headers=headers) as resp:
+                    if resp.status == 204:
+                        return json.dumps({
+                            "success": True,
+                            "action": "react",
+                            "emoji": emoji,
+                            "message_id": message_id,
+                            "channel_id": channel_id,
+                        })
+                    else:
+                        error_text = await resp.text()
+                        return json.dumps({
+                            "error": f"Discord API error {resp.status}",
+                            "detail": error_text[:500],
+                        })
+        except Exception as e:
+            return json.dumps({"error": f"discord_react failed: {e}"})
