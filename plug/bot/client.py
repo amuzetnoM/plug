@@ -301,7 +301,8 @@ class PlugBot:
             if author_name.endswith(' Report'):
                 logger.debug("Ignoring report-back webhook from %s in %s", author_name, channel_id)
                 return
-            logger.info("Accepting webhook dispatch in %s (webhook_id=%s)", channel_id, webhook_id)
+            if not is_sister_bot:
+                logger.info("Accepting webhook dispatch in %s (webhook_id=%s)", channel_id, webhook_id)
 
         # C-Suite channels: ignore @mentions (those are for AVA/OpenClaw),
         # only respond to plain messages. Skip this for personas that require mentions.
@@ -384,6 +385,13 @@ class PlugBot:
 
         # Webhook dispatches always pass — they were already validated in on_message
         if is_webhook:
+            return True
+
+        # Sister bots bypass authorized_users and mention checks (except in strict channels)
+        is_sister = str(message.author.id) in set(self.config.discord.sister_bot_ids)
+        strict_channels = getattr(self.config.discord, 'strict_mention_channels', []) or []
+        is_strict = channel_id in strict_channels
+        if is_sister and not is_strict:
             return True
 
         # ── Authorized users gate ────────────────────────────────────────
@@ -868,33 +876,64 @@ def _truncate_args(args: dict[str, Any], max_len: int = 200) -> str:
 
 
 def _sanitize_tool_pairs(messages: list[Message]) -> list[Message]:
-    """Remove orphaned tool results that have no matching assistant tool_call.
+    """Remove orphaned tool results AND orphaned tool calls.
 
-    This prevents 400 errors from the API when compaction or session corruption
-    leaves tool results without their parent assistant message.
+    Prevents 400 errors from the API when:
+    1. Compaction or session corruption leaves tool results without their
+       parent assistant message (orphaned tool_result).
+    2. A process crash (e.g. `ava restart`) kills the bot before a tool
+       result is stored, leaving an assistant with tool_calls but no
+       matching tool_result (orphaned tool_call).
+
+    Both directions are checked to ensure every tool_use has a matching
+    tool_result and vice versa.
     """
-    # Collect all tool_call IDs from assistant messages
-    known_tool_call_ids: set[str] = set()
+    # Pass 1: Collect all tool_call IDs and tool_result IDs
+    tool_call_ids: set[str] = set()  # IDs from assistant tool_calls
+    tool_result_ids: set[str] = set()  # IDs from tool messages
     for msg in messages:
         if msg.role == "assistant" and msg.tool_calls:
             for tc in msg.tool_calls:
-                known_tool_call_ids.add(tc.id)
+                tool_call_ids.add(tc.id)
+        if msg.role == "tool" and msg.tool_call_id:
+            tool_result_ids.add(msg.tool_call_id)
 
-    # Filter: keep tool messages only if their tool_call_id is known
+    # IDs that have BOTH a call and a result = complete pairs
+    complete_ids = tool_call_ids & tool_result_ids
+
+    # Pass 2: Filter messages
     sanitized = []
     dropped = 0
     for msg in messages:
+        # Drop orphaned tool results (no matching assistant tool_call)
         if msg.role == "tool" and msg.tool_call_id:
-            if msg.tool_call_id not in known_tool_call_ids:
+            if msg.tool_call_id not in complete_ids:
                 dropped += 1
                 continue
-        # Also strip leading tool messages (before any assistant)
+        # Drop leading tool messages (before any assistant)
         if msg.role == "tool" and not any(m.role == "assistant" for m in sanitized):
             dropped += 1
             continue
+        # Drop assistant messages whose tool_calls have NO matching results
+        if msg.role == "assistant" and msg.tool_calls:
+            msg_tc_ids = {tc.id for tc in msg.tool_calls}
+            if not msg_tc_ids & complete_ids:
+                # None of this assistant's tool_calls have results — orphan
+                # Replace with a text-only version if it had content, else drop
+                if msg.content and msg.content.strip():
+                    sanitized.append(Message(
+                        role="assistant",
+                        content=msg.content,
+                        tool_calls=None,
+                    ))
+                    logger.warning("Stripped orphaned tool_calls from assistant message (kept text content)")
+                else:
+                    dropped += 1
+                continue
+
         sanitized.append(msg)
 
     if dropped:
-        logger.warning("Sanitized %d orphaned tool result(s) from conversation", dropped)
+        logger.warning("Sanitized %d orphaned tool message(s) from conversation", dropped)
 
     return sanitized
