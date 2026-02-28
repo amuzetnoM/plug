@@ -240,6 +240,47 @@ def init(token: str | None, guild: str | None, model: str, proxy: str, workspace
 
 # ── plug start / stop / restart ──────────────────────────────────────────
 
+def _is_termux() -> bool:
+    """Detect Termux/Android environment (no fork/systemd support)."""
+    return os.path.isdir("/data/data/com.termux") or "TERMUX_VERSION" in os.environ
+
+
+def _daemonize_fork() -> bool:
+    """Unix double-fork daemon. Returns True in parent, False in child."""
+    pid = os.fork()
+    if pid > 0:
+        return True  # parent
+
+    os.setsid()
+    pid2 = os.fork()
+    if pid2 > 0:
+        os._exit(0)
+
+    sys.stdin.close()
+    stdout_log = open(LOG_FILE, "a")
+    os.dup2(stdout_log.fileno(), sys.stdout.fileno())
+    os.dup2(stdout_log.fileno(), sys.stderr.fileno())
+    return False  # child
+
+
+def _daemonize_subprocess() -> None:
+    """Termux-compatible daemon using subprocess (no fork)."""
+    import subprocess
+    venv_python = sys.executable
+    cmd = [venv_python, "-m", "plug.cli", "start", "--foreground"]
+    log_fd = open(LOG_FILE, "a")
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log_fd,
+        stderr=log_fd,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    # Write PID immediately so status/stop work
+    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PID_FILE.write_text(str(proc.pid))
+
+
 @cli.command()
 @click.option("--foreground", "-f", is_flag=True, help="Run in foreground (no daemon).")
 @click.option("--debug", is_flag=True, help="Enable debug logging.")
@@ -260,8 +301,9 @@ def start(foreground: bool, debug: bool) -> None:
 
     click.echo(f"{LOGO_MINI} Starting daemon...")
 
-    pid = os.fork()
-    if pid > 0:
+    if _is_termux():
+        # Termux: no os.fork(), use subprocess detach
+        _daemonize_subprocess()
         time.sleep(1.5)
         if is_running():
             success(f"Running (PID {read_pidfile()})")
@@ -271,15 +313,17 @@ def start(foreground: bool, debug: bool) -> None:
             dim(f"tail -f {LOG_FILE}")
         return
 
-    os.setsid()
-    pid2 = os.fork()
-    if pid2 > 0:
-        os._exit(0)
-
-    sys.stdin.close()
-    stdout_log = open(LOG_FILE, "a")
-    os.dup2(stdout_log.fileno(), sys.stdout.fileno())
-    os.dup2(stdout_log.fileno(), sys.stderr.fileno())
+    # Unix: classic double-fork
+    is_parent = _daemonize_fork()
+    if is_parent:
+        time.sleep(1.5)
+        if is_running():
+            success(f"Running (PID {read_pidfile()})")
+            dim(f"Logs: tail -f {LOG_FILE}")
+        else:
+            fail("Failed to start. Check logs:")
+            dim(f"tail -f {LOG_FILE}")
+        return
 
     try:
         asyncio.run(run_bot(debug=debug))
@@ -447,10 +491,16 @@ def status() -> None:
     if pid:
         try:
             os.kill(pid, 0)
-            create_time = os.path.getctime(f"/proc/{pid}")
-            uptime_s = time.time() - create_time
-            h, m = int(uptime_s // 3600), int((uptime_s % 3600) // 60)
-            click.echo(box_row(f"Process:  🟢 Running (PID {pid}, {h}h{m}m)"))
+            # Cross-platform uptime: /proc/ on Linux, fallback to psutil or skip
+            uptime_str = ""
+            try:
+                create_time = os.path.getctime(f"/proc/{pid}")
+                uptime_s = time.time() - create_time
+                h, m = int(uptime_s // 3600), int((uptime_s % 3600) // 60)
+                uptime_str = f", {h}h{m}m"
+            except (FileNotFoundError, OSError):
+                pass  # Termux/macOS: no /proc, skip uptime
+            click.echo(box_row(f"Process:  🟢 Running (PID {pid}{uptime_str})"))
         except (ProcessLookupError, FileNotFoundError):
             click.echo(box_row("Process:  🔴 Stale PID (cleaning)"))
             remove_pidfile()
@@ -878,7 +928,11 @@ def cron_runs(job_id: str, limit: int) -> None:
 @cli.command()
 @click.option("--with-proxy", is_flag=True, help="Also install copilot-proxy service.")
 def install(with_proxy: bool) -> None:
-    """Install PLUG as a systemd user service."""
+    """Install PLUG as a systemd/Termux service."""
+    if _is_termux():
+        _install_termux(with_proxy)
+        return
+
     service_dir = Path.home() / ".config" / "systemd" / "user"
     service_dir.mkdir(parents=True, exist_ok=True)
 
@@ -955,7 +1009,11 @@ WantedBy=default.target
 
 @cli.command()
 def uninstall() -> None:
-    """Remove systemd services."""
+    """Remove systemd/Termux services."""
+    if _is_termux():
+        _uninstall_termux()
+        return
+
     service_dir = Path.home() / ".config" / "systemd" / "user"
     removed = False
     for name in ["plug.service", "plug-proxy.service"]:
@@ -972,6 +1030,56 @@ def uninstall() -> None:
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
+def _install_termux(with_proxy: bool) -> None:
+    """Install PLUG as a Termux boot script (no systemd)."""
+    boot_dir = Path.home() / ".termux" / "boot"
+    boot_dir.mkdir(parents=True, exist_ok=True)
+
+    python_path = sys.executable
+    plug_path = Path(__file__).resolve().parent.parent
+
+    bot_script = f"""#!/data/data/com.termux/files/usr/bin/sh
+# PLUG Discord AI Gateway - Termux boot script
+cd {plug_path}
+{python_path} -m plug start --foreground >> ~/.plug/plug.log 2>&1 &
+"""
+    bot_file = boot_dir / "plug-bot.sh"
+    bot_file.write_text(bot_script)
+    os.chmod(bot_file, 0o755)
+    success("plug-bot.sh installed to ~/.termux/boot/")
+
+    if with_proxy:
+        proxy_script_path = plug_path / "copilot_proxy.py"
+        proxy_script = f"""#!/data/data/com.termux/files/usr/bin/sh
+# PLUG Copilot Proxy - Termux boot script
+cd {plug_path}
+{python_path} {proxy_script_path} >> ~/.plug/proxy.log 2>&1 &
+"""
+        proxy_file = boot_dir / "plug-proxy.sh"
+        proxy_file.write_text(proxy_script)
+        os.chmod(proxy_file, 0o755)
+        success("plug-proxy.sh installed to ~/.termux/boot/")
+
+    click.echo()
+    info("Install Termux:Boot from F-Droid to enable auto-start.")
+    info("To start now: plug start")
+    click.echo()
+
+
+def _uninstall_termux() -> None:
+    """Remove Termux boot scripts."""
+    boot_dir = Path.home() / ".termux" / "boot"
+    removed = False
+    for name in ["plug-bot.sh", "plug-proxy.sh"]:
+        f = boot_dir / name
+        if f.exists():
+            f.unlink()
+            success(f"Removed {name}")
+            removed = True
+    if not removed:
+        info("No Termux boot scripts installed.")
+
+
 def _mask(secret: str, show: int = 4) -> str:
     if len(secret) <= show:
         return "***"
@@ -980,6 +1088,8 @@ def _mask(secret: str, show: int = 4) -> str:
 
 def _systemd_active(unit: str) -> bool:
     """Check if a systemd user unit is active."""
+    if _is_termux():
+        return False  # No systemd on Termux
     import subprocess
     result = subprocess.run(
         ["systemctl", "--user", "is-active", unit],

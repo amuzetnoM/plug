@@ -191,6 +191,8 @@ class CopilotChatProvider(ChatProvider):
 
     @staticmethod
     def _parse_response(data: dict[str, Any]) -> ChatResponse:
+        if not data.get("choices"):
+            return ChatResponse(message=Message(role="assistant", content=""), model="", finish_reason="error")
         choice = data["choices"][0]
         msg_data = choice["message"]
 

@@ -29,6 +29,7 @@ from plug.bot.chunker import chunk_message
 from plug.config import PlugConfig, DB_FILE
 from plug.models.base import ChatProvider, Message, ProviderChain
 from plug.models.proxy import ProxyChatProvider
+from plug.models.copilot import CopilotChatProvider
 from plug.models.ollama import OllamaChatProvider
 from plug.prompt import load_system_prompt
 from plug.sessions.compactor import Compactor, count_message_tokens
@@ -42,7 +43,7 @@ from plug.router import AgentRouter, AgentPersona
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 15  # Safety limit for tool-call loops
+MAX_TOOL_ROUNDS = 45  # Safety limit for tool-call loops
 
 # ── Report-back: notify AVA when exec tasks complete ─────────────────────
 AVA_REPORT_WEBHOOK = "https://discord.com/api/webhooks/1473633265410773106/IbfQs7cfG7RpWQJudwL2vbfOPctt-Myr03FEf6BmHAdPwl7sGb47i90shamzC_QyyMw0"
@@ -113,13 +114,18 @@ class PlugBot:
         self.store = SessionStore(DB_FILE)
         await self.store.open()
 
-        # Model provider (primary: proxy)
+        # Model provider (primary: GitHub Copilot direct, fallback: proxy)
         proxy_cfg = self.config.models.proxy
-        self.provider = ProxyChatProvider(
+        proxy_fallback = ProxyChatProvider(
             base_url=proxy_cfg.base_url,
             api_key=proxy_cfg.api_key,
             timeout=proxy_cfg.timeout,
             default_model=self.config.models.primary,
+        )
+        self.provider = CopilotChatProvider(
+            default_model=self.config.models.primary,
+            timeout=proxy_cfg.timeout,
+            fallback=proxy_fallback,
         )
 
         # Ollama fallback provider
@@ -304,18 +310,24 @@ class PlugBot:
             if not is_sister_bot:
                 logger.info("Accepting webhook dispatch in %s (webhook_id=%s)", channel_id, webhook_id)
 
-        # C-Suite channels: ignore @mentions (those are for AVA/OpenClaw),
-        # only respond to plain messages. Skip this for personas that require mentions.
+        # C-Suite channels: if someone @mentions a sister bot (AVA) in a channel
+        # where this persona doesn't require mentions, skip — they're talking to the
+        # sister, not to this persona. But if they @mention US, that's direct address.
         if self.router and self.client.user and not is_webhook_dispatch:
             channel_id = str(message.channel.id)
             persona = self.router.route(channel_id)
             if persona and not persona.require_mention:
-                mentioned = any(
+                sister_ids = set(self.config.discord.sister_bot_ids)
+                mentions_sister = any(
+                    str(user.id) in sister_ids
+                    for user in message.mentions
+                )
+                mentions_me = any(
                     user.id == self.client.user.id
                     for user in message.mentions
                 )
-                if mentioned:
-                    return  # @mention = talking to AVA, not C-suite
+                if mentions_sister and not mentions_me:
+                    return  # @sister in a no-mention channel = talking to sister, not us
 
         # Check if we should respond (webhook dispatches bypass mention requirement)
         if not self._should_respond(message, is_webhook=is_webhook_dispatch):

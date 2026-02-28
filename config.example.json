@@ -1,0 +1,51 @@
+{
+  "discord": {
+    "token": "",
+    "guild_ids": ["YOUR_GUILD_ID"],
+    "bot_user_id": "YOUR_BOT_USER_ID",
+    "require_mention": true,
+    "dm_policy": "allowlist",
+    "dm_allowlist": [],
+    "authorized_users": [],
+    "sister_bot_ids": [],
+    "strict_mention_channels": [],
+    "status_message": "🔮 PLUG Online",
+    "max_message_length": 2000,
+    "reconnect_delay": 5.0,
+    "max_reconnect_delay": 300.0
+  },
+  "models": {
+    "primary": "claude-sonnet-4.6",
+    "fallbacks": ["gpt-4o", "llama3"],
+    "proxy": {
+      "base_url": "http://localhost:3000/v1",
+      "api_key": "n/a",
+      "timeout": 120.0
+    },
+    "temperature": 0.7,
+    "max_tokens": 4096
+  },
+  "ollama": {
+    "enabled": false,
+    "base_url": "http://localhost:11434",
+    "models": ["qwen2.5-coder:7b"],
+    "timeout": 120.0
+  },
+  "agent": {
+    "workspace": "~/workspace",
+    "system_prompt_files": ["SOUL.md", "IDENTITY.md"],
+    "exec_timeout": 30,
+    "exec_max_output": 50000
+  },
+  "compaction": {
+    "enabled": true,
+    "max_context_tokens": 100000,
+    "target_tokens": 60000,
+    "summary_model": ""
+  },
+  "daemon": {
+    "auto_restart": true,
+    "max_restarts": 5,
+    "restart_window": 300
+  }
+}

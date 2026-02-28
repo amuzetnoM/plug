@@ -36,7 +36,7 @@ class AgentPersona:
 
     @property
     def system_prompt(self) -> str:
-        """Load system prompt from workspace files."""
+        """Load system prompt from workspace files, with COMB recall injected."""
         parts = []
         ws = Path(self.workspace)
         for fname in self.system_prompt_files:
@@ -45,7 +45,46 @@ class AgentPersona:
                 parts.append(fpath.read_text().strip())
             else:
                 log.warning(f"Persona {self.name}: prompt file not found: {fpath}")
-        return "\n\n---\n\n".join(parts) if parts else f"You are {self.name}."
+        
+        prompt = "\n\n---\n\n".join(parts) if parts else f"You are {self.name}."
+        
+        # Inject COMB recall into every persona prompt
+        comb_context = self._recall_comb()
+        if comb_context:
+            prompt = (
+                f"{prompt}\n\n"
+                f"## Persistent Memory (COMB Recall)\n"
+                f"{comb_context}"
+            )
+        
+        return prompt
+
+    @staticmethod
+    def _recall_comb() -> str | None:
+        """Recall Aria's persistent memory from COMB store."""
+        try:
+            from comb import CombStore
+            store_path = Path.home() / "plug" / "aria_memory" / "comb-store"
+            if not store_path.exists():
+                return None
+            store = CombStore(str(store_path))
+            results = store.search("identity tasks status context", mode="bm25", k=5)
+            if not results:
+                return None
+            memories = []
+            seen = set()
+            for doc in sorted(results, key=lambda d: d.date, reverse=True):
+                if doc.date not in seen:
+                    seen.add(doc.date)
+                    memories.append(f"--- {doc.date} ---\n{doc.to_dict()['content'][:800]}")
+            if not memories:
+                return None
+            text = "\n\n".join(memories)
+            log.info(f"COMB recall injected: {len(memories)} entries, {len(text)} chars")
+            return text
+        except Exception as e:
+            log.debug(f"COMB recall skipped: {e}")
+            return None
 
 
 class AgentRouter:
