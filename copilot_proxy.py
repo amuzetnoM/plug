@@ -189,6 +189,14 @@ class CopilotProxy:
         body = await request.json()
         stream = body.get("stream", False)
 
+        # Safeguard: Copilot API rejects conversations ending with assistant messages
+        # Strip trailing assistant messages before forwarding
+        msgs = body.get("messages", [])
+        while len(msgs) > 1 and msgs[-1].get("role") == "assistant":
+            msgs.pop()
+            print(f"[PROXY:{self.port}] Dropped trailing assistant message (prefill guard)", file=sys.stderr)
+        body["messages"] = msgs
+
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
@@ -238,7 +246,6 @@ class CopilotProxy:
                 )
 
                 if resp.status_code >= 400:
-                    import sys
                     model = body.get("model", "unknown")
                     msg_count = len(body.get("messages", []))
                     has_tools = bool(body.get("tools"))

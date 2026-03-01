@@ -43,7 +43,7 @@ from plug.router import AgentRouter, AgentPersona
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 45  # Safety limit for tool-call loops
+MAX_TOOL_ROUNDS = 200  # Safety limit for tool-call loops
 
 # ── Report-back: notify AVA when exec tasks complete ─────────────────────
 AVA_REPORT_WEBHOOK = "https://discord.com/api/webhooks/1473633265410773106/IbfQs7cfG7RpWQJudwL2vbfOPctt-Myr03FEf6BmHAdPwl7sGb47i90shamzC_QyyMw0"
@@ -114,18 +114,13 @@ class PlugBot:
         self.store = SessionStore(DB_FILE)
         await self.store.open()
 
-        # Model provider (primary: GitHub Copilot direct, fallback: proxy)
+        # Model provider: proxy (copilot_proxy handles token exchange)
         proxy_cfg = self.config.models.proxy
-        proxy_fallback = ProxyChatProvider(
+        self.provider = ProxyChatProvider(
             base_url=proxy_cfg.base_url,
             api_key=proxy_cfg.api_key,
             timeout=proxy_cfg.timeout,
             default_model=self.config.models.primary,
-        )
-        self.provider = CopilotChatProvider(
-            default_model=self.config.models.primary,
-            timeout=proxy_cfg.timeout,
-            fallback=proxy_fallback,
         )
 
         # Ollama fallback provider
@@ -481,14 +476,20 @@ class PlugBot:
             if cleared:
                 logger.info("Cleared %d old messages for dispatch in %s", cleared, channel_id)
 
+        # Inject message metadata so the LLM can reference message IDs
+        # (needed for discord_react tool and reply threading)
+        msg_header = f"<<message_id={message.id} channel_id={channel_id}>>"
+
         # Store the user message — inject sister context if from a sibling bot
         is_sister = str(message.author.id) in set(self.config.discord.sister_bot_ids)
         if is_sister:
             user_text = (
+                f"{msg_header}\n"
                 f"[From your sister (AVA)]\n"
-                f"(You have CHOICE — reply genuinely or reply with exactly NO_REPLY to stay silent.)\n\n"
                 f"{user_text}"
             )
+        else:
+            user_text = f"{msg_header}\n{user_text}"
         user_msg = Message(role="user", content=user_text)
         user_tokens = count_message_tokens(user_msg)
         await self.store.add_message(channel_id, user_msg, token_count=user_tokens)
@@ -711,6 +712,22 @@ class PlugBot:
         history = _sanitize_tool_pairs(history)
 
         messages.extend(history)
+
+        # Guard: conversation must not end with an assistant message
+        # (causes "assistant message prefill" errors on OpenAI/Copilot APIs)
+        # Drop ALL trailing assistant messages — with or without tool_calls.
+        # An assistant msg with tool_calls but no tool results is an orphan
+        # that _sanitize_tool_pairs should have caught, but belt-and-suspenders.
+        while (
+            len(messages) > 1
+            and messages[-1].role == "assistant"
+        ):
+            dropped = messages.pop()
+            logger.warning(
+                "Dropped trailing assistant message to prevent prefill error (tool_calls=%s): %s",
+                bool(dropped.tool_calls),
+                (dropped.content or "")[:80],
+            )
 
         return messages
 

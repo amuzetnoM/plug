@@ -59,6 +59,9 @@ def load_system_prompt(
         f"Current time: {now.strftime('%H:%M %Z')}\n"
         f"Workspace: {workspace}\n"
         f"Platform: Discord (Aria/Plug bot framework)\n"
+        f"\n"
+        f"Each user message starts with <<message_id=ID channel_id=CHANNEL_ID>>.\n"
+        f"Use these IDs with the discord_react tool to add emoji reactions to messages.\n"
     )
 
     # Auto-recall COMB memory (persistent cross-session memory)
