@@ -45,6 +45,13 @@ logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 200  # Safety limit for tool-call loops
 
+# ── Interrupt bus: stop keywords that immediately halt the agent loop ────
+INTERRUPT_KEYWORDS = frozenset({
+    "stop", "halt", "abort", "cancel", "enough", "shut up",
+    "stop it", "hold on", "wait", "nevermind", "never mind",
+    "drop it", "forget it", "kill it", "bas", "ruk", "ruko",
+})
+
 # ── Report-back: notify AVA when exec tasks complete ─────────────────────
 AVA_REPORT_WEBHOOK = "https://discord.com/api/webhooks/1473633265410773106/IbfQs7cfG7RpWQJudwL2vbfOPctt-Myr03FEf6BmHAdPwl7sGb47i90shamzC_QyyMw0"
 AVA_BOT_MENTION = "<@1459121107641569291>"  # @AVA#5921
@@ -101,6 +108,7 @@ class PlugBot:
         # State
         self._processing: set[str] = set()  # channel IDs currently being processed
         self._sister_cooldown: dict[str, float] = {}  # channel_id → last response timestamp
+        self._interrupt: dict[str, str] = {}  # channel_id → interrupt message (interrupt bus)
 
         # Wire up events
         self.client.event(self.on_ready)
@@ -332,10 +340,24 @@ class PlugBot:
         # Prevent concurrent processing of same channel
         channel_id = str(message.channel.id)
         if channel_id in self._processing:
+            # ── Interrupt bus: check for stop keywords while processing ──
+            msg_text = (message.content or "").lower().strip()
+            # Strip bot mentions from the text before checking keywords
+            for mention_pattern in [f"<@{self.client.user.id}>", f"<@!{self.client.user.id}>"] if self.client.user else []:
+                msg_text = msg_text.replace(mention_pattern, "").strip()
+            if msg_text in INTERRUPT_KEYWORDS:
+                self._interrupt[channel_id] = msg_text
+                logger.warning("INTERRUPT BUS: '%s' received for %s — flagging for immediate stop", msg_text, channel_id)
+                try:
+                    await message.add_reaction("🛑")
+                except Exception:
+                    pass
+                return
             logger.info("Already processing %s, skipping", channel_id)
             return
 
         logger.info("Processing message in %s from %s", channel_id, message.author)
+        self._interrupt.pop(channel_id, None)  # Clear stale interrupt flags
         self._processing.add(channel_id)
         try:
             await self._handle_message(message, is_dispatch=is_webhook_dispatch)
@@ -532,6 +554,12 @@ class PlugBot:
         5. When LLM returns text (no tool_calls), return it
         """
         for round_num in range(MAX_TOOL_ROUNDS):
+            # ── Interrupt bus check: stop immediately if flagged ──
+            if channel_id in self._interrupt:
+                keyword = self._interrupt.pop(channel_id)
+                logger.warning("INTERRUPT BUS: stopping agent loop at round %d (keyword: '%s')", round_num, keyword)
+                return f"[Stopped — received \"{keyword}\"]"
+
             # Throttle between rounds to avoid rate-limiting (especially with parallel execs)
             if round_num > 0:
                 await asyncio.sleep(0.5)
@@ -584,6 +612,12 @@ class PlugBot:
             )
 
             for tc in assistant_msg.tool_calls:
+                # Check interrupt between tool calls too (don't wait for next round)
+                if channel_id in self._interrupt:
+                    keyword = self._interrupt.pop(channel_id)
+                    logger.warning("INTERRUPT BUS: stopping mid-tool-execution at round %d (keyword: '%s')", round_num, keyword)
+                    return f"[Stopped — received \"{keyword}\"]"
+
                 logger.info("Executing tool: %s(%s)", tc.name, _truncate_args(tc.arguments))
 
                 result = await self.executor.execute(tc.name, tc.arguments)
